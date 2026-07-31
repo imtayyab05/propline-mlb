@@ -1,0 +1,16 @@
+# secrets
+.env
+.env.local
+
+# generated data
+data/raw/
+data/intermediate/
+data/picks/
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# excel lockfiles
+~$*.xlsx

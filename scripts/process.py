@@ -1,0 +1,176 @@
+"""Phase 2 entry point — turn a collection run into ranked prop picks.
+
+Reads the intermediate workbook produced by scripts/collect.py, builds matchups,
+scores every prop category, and writes the client-facing Excel file.
+
+  python scripts/process.py --date 2026-07-31
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import sys
+import traceback
+from datetime import date, datetime
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from propline.db import load_env, log_run  # noqa: E402
+from propline.matchup import build_matchups  # noqa: E402
+from propline.publish import publish_slate  # noqa: E402
+from propline.rationale import add_rationales  # noqa: E402
+from propline.mlb import get_player_names  # noqa: E402
+from propline.output import build_picks_workbook  # noqa: E402
+from propline.rolling import rolling_pitcher_splits  # noqa: E402
+from propline.scoring import (score_batter_props, score_game_totals,
+                              score_pitcher_strikeouts)  # noqa: E402
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="PropLine MLB — processing")
+    ap.add_argument("--date", default=date.today().isoformat())
+    ap.add_argument("--window", default="L10", choices=["L5", "L10"])
+    ap.add_argument("--top", type=int, default=40)
+    ap.add_argument("--no-rationale", action="store_true", help="skip the Groq step")
+    ap.add_argument("--publish", action="store_true", help="write results to Supabase")
+    args = ap.parse_args()
+    load_env()
+
+    started = datetime.now()
+    day = args.date
+    raw_dir = Path("data/raw") / day
+    inter = Path("data/intermediate") / f"collection_{day}.xlsx"
+    if not inter.exists():
+        print(f"missing {inter} — run scripts/collect.py --date {day} first")
+        return 1
+
+    print(f"\n{'='*66}\nPropLine processing — {day}\n{'='*66}")
+
+    x = pd.ExcelFile(inter)
+    lineups = pd.read_excel(x, "lineups")
+    schedule = pd.read_excel(x, "schedule")
+    rolling = pd.read_excel(x, "rolling_splits")
+
+    ba = pd.read_csv(raw_dir / "batter_pitch_arsenal_stats.csv")
+    pa = pd.read_csv(raw_dir / "pitcher_pitch_arsenal_stats.csv")
+    season = pd.read_csv(raw_dir / "batter_expected_stats.csv")
+
+    # --- matchups ---------------------------------------------------------------
+    print("\n[1/7] Matchup engine")
+    matchups = build_matchups(lineups, schedule, ba, pa)
+    print(f"  ok    {len(matchups)} hitter-vs-starter matchups "
+          f"({int(matchups.reliable.sum())} with reliable arsenal coverage)")
+
+    # --- pitcher rolling (needed for K props) ------------------------------------
+    print("\n[2/7] Pitcher rolling form")
+    raw_files = glob.glob(str(raw_dir / "statcast_raw_*.csv"))
+    if raw_files:
+        raw = pd.read_csv(raw_files[0], low_memory=False)
+        names = get_player_names(raw.pitcher.dropna().unique())
+        pitcher_rolling = rolling_pitcher_splits(raw, windows=(5, 10), name_map=names)
+        print(f"  ok    {pitcher_rolling.player_id.nunique()} pitchers")
+    else:
+        pitcher_rolling = pd.DataFrame()
+        print("  WARN  no raw pitch data — strikeout props will be skipped")
+
+    # --- scoring ----------------------------------------------------------------
+    print("\n[3/7] Scoring")
+    batter_scores = score_batter_props(matchups, rolling, season, window=args.window)
+    print(f"  ok    batters: {len(batter_scores)} rows across "
+          f"{batter_scores.prop.nunique()} categories")
+
+    if not pitcher_rolling.empty:
+        pitcher_scores = score_pitcher_strikeouts(schedule, pitcher_rolling, lineups,
+                                                  rolling, window=args.window)
+        print(f"  ok    strikeouts: {len(pitcher_scores)} starters")
+    else:
+        pitcher_scores = pd.DataFrame()
+
+    # --- game + team totals -----------------------------------------------------
+    print("\n[4/7] Game and team totals")
+    bullpen = pd.read_excel(x, "bullpen_status")
+    pf_path = raw_dir / "park_factors.csv"
+    park = pd.read_csv(pf_path) if pf_path.exists() else pd.DataFrame(columns=["venue_name"])
+    if not pf_path.exists():
+        print("  WARN  no park_factors.csv — all parks treated as neutral")
+    team_totals, game_totals = score_game_totals(schedule, matchups, bullpen, park,
+                                                 rolling, window=args.window)
+    print(f"  ok    totals: {len(game_totals)} games, {len(team_totals)} team totals")
+
+    # --- rationale --------------------------------------------------------------
+    if not args.no_rationale:
+        print("\n[5/7] Written reasons (Groq)")
+        bfields = ["player_name", "team", "opp_starter", "matchup_est_woba",
+                   "matchup_est_slg", "recent_barrel_pct", "recent_hard_hit",
+                   "best_pitch_for_batter", "primary_pitch", "recent_games"]
+        parts = []
+        for prop, grp in batter_scores.groupby("prop"):
+            parts.append(add_rationales(grp, bfields, prop, top_n=12))
+        batter_scores = pd.concat(parts, ignore_index=True)
+        if not pitcher_scores.empty:
+            pitcher_scores = add_rationales(
+                pitcher_scores, ["player_name", "team", "opponent", "recent_k_per_game",
+                                 "recent_k_pct", "recent_whiff_pct", "opp_lineup_k_pct",
+                                 "recent_games"], "strikeouts", top_n=12)
+        game_totals = add_rationales(
+            game_totals, ["teams", "venue", "park_runs", "combined_offense",
+                          "combined_bullpen_tired"], "game_total", top_n=8)
+        team_totals = add_rationales(
+            team_totals, ["team", "opponent", "opp_starter", "park_runs",
+                          "lineup_matchup_woba", "opp_bullpen_tired"], "team_total", top_n=8)
+        done = int(batter_scores.rationale.notna().sum())
+        print(f"  ok    {done} batter picks explained")
+    else:
+        print("\n[5/7] Written reasons — SKIPPED")
+
+    # --- output -----------------------------------------------------------------
+    print("\n[6/7] Picks workbook")
+    statuses = lineups.status.value_counts().to_dict() if not lineups.empty else {}
+    meta = {
+        "Slate date": day,
+        "Generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "Games": len(schedule),
+        "Lineup status": ", ".join(f"{k}: {v}" for k, v in statuses.items()),
+        "Form window": args.window,
+        "Picks per category": args.top,
+        "Note": "Projected lineups are an early read; confirmed lineups post 2-4h before first pitch.",
+    }
+    out = build_picks_workbook(batter_scores, pitcher_scores,
+                               Path("data/picks") / f"props_{day}.xlsx",
+                               meta, top_n=args.top,
+                               team_totals=team_totals, game_totals=game_totals)
+    print(f"  ok    {out}")
+
+    # --- publish ----------------------------------------------------------------
+    if args.publish:
+        print("\n[7/7] Publishing to Supabase")
+        try:
+            written = publish_slate(day, schedule, lineups, bullpen, batter_scores,
+                                    pitcher_scores, team_totals, game_totals,
+                                    top_n=args.top)
+            for table, n in written.items():
+                print(f"  ok    {table:16} {n} rows")
+            log_run(day, "manual", "processing", "ok",
+                    detail=", ".join(f"{k}={v}" for k, v in written.items()),
+                    started_at=started)
+        except Exception as exc:
+            log_run(day, "manual", "processing", "failed", detail=str(exc)[:400],
+                    started_at=started)
+            raise
+    else:
+        print("\n[7/7] Publishing — SKIPPED (pass --publish)")
+
+    print(f"\n{'='*66}\nprocessing OK")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception:
+        traceback.print_exc()
+        raise SystemExit(1)
