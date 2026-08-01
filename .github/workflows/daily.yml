@@ -5,11 +5,16 @@ name: Daily slate
 # afternoon to late evening. One afternoon run would leave whole games on projected
 # lineups all day.
 #
-#   13:00 UTC  09:00 ET  FULL pull   - stats + projected lineups (the early read)
-#   15:30 UTC  11:30 ET  reuse       - day games (~13:05 ET) now confirmed
-#   18:00 UTC  14:00 ET  reuse       - late-afternoon games confirmed
-#   21:00 UTC  17:00 ET  reuse       - evening games confirmed
-#   23:00 UTC  19:00 ET  reuse       - late/west-coast games confirmed
+#   13:07 UTC  09:07 ET  FULL pull   - stats + projected lineups (the early read)
+#   15:37 UTC  11:37 ET  reuse       - day games (~13:05 ET) now confirmed
+#   18:07 UTC  14:07 ET  reuse       - late-afternoon games confirmed
+#   21:07 UTC  17:07 ET  reuse       - evening games confirmed
+#   23:07 UTC  19:07 ET  reuse       - late/west-coast games confirmed
+#
+# The odd minutes are deliberate. GitHub's scheduler is best-effort and queues the
+# whole platform at the top of every hour, so ':00' jobs are routinely delayed by
+# tens of minutes and are sometimes dropped outright. Seven minutes past is far
+# less contended for no practical difference in timing.
 #
 # Cost control: only the 13:00 run downloads from Baseball Savant. Season stats do not
 # change during the day, so the later runs restore that download from the cache and
@@ -22,11 +27,11 @@ name: Daily slate
 
 on:
   schedule:
-    - cron: '0 13 * * *'
-    - cron: '30 15 * * *'
-    - cron: '0 18 * * *'
-    - cron: '0 21 * * *'
-    - cron: '0 23 * * *'
+    - cron: '7 13 * * *'
+    - cron: '37 15 * * *'
+    - cron: '7 18 * * *'
+    - cron: '7 21 * * *'
+    - cron: '7 23 * * *'
   workflow_dispatch:
     inputs:
       slate_date:
