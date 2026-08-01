@@ -130,12 +130,27 @@ def delete_where(table: str, filters: dict) -> None:
     url, key = _creds()
     if not filters:
         raise SupabaseError("delete_where refuses to run without filters")
-    r = requests.delete(f"{url}/rest/v1/{table}",
-                        headers={"apikey": key, "Authorization": f"Bearer {key}",
-                                 "Prefer": "return=minimal"},
-                        params=filters, timeout=TIMEOUT)
-    if not r.ok:
-        raise SupabaseError(f"delete {table}: {r.status_code} {r.text[:300]}")
+
+    # Same retry policy as upsert. This is a critical-path step now — the board is
+    # cleared before it is rewritten — so a transient 522 from Cloudflare must not
+    # take down an otherwise healthy scheduled run.
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.delete(f"{url}/rest/v1/{table}",
+                                headers={"apikey": key, "Authorization": f"Bearer {key}",
+                                         "Prefer": "return=minimal"},
+                                params=filters, timeout=TIMEOUT)
+            if r.ok:
+                return
+            if 400 <= r.status_code < 500:
+                raise SupabaseError(f"delete {table}: {r.status_code} {r.text[:300]}")
+            last = SupabaseError(f"delete {table}: {r.status_code} {r.text[:200]}")
+        except requests.RequestException as exc:
+            last = SupabaseError(f"delete {table}: connection failed — {exc}")
+        if attempt < RETRIES:
+            time.sleep(2 ** attempt)
+    raise last
 
 
 def log_run(slate_date, run_type, stage, status, detail=None, started_at=None) -> None:
