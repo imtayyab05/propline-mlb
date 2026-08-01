@@ -119,6 +119,25 @@ def upsert(table: str, df: pd.DataFrame, on_conflict: str | None = None,
     return sent
 
 
+def delete_where(table: str, filters: dict) -> None:
+    """Delete rows matching PostgREST filters, e.g. {"slate_date": "eq.2026-07-31"}.
+
+    Needed because a pick board is a SNAPSHOT, not an accumulation. Upserting alone
+    leaves behind anyone who was in the top N on an earlier run and dropped out on a
+    later one — their stale row keeps its old rank and score, so the board ends up a
+    blend of several runs with duplicate ranks and out-of-order scores.
+    """
+    url, key = _creds()
+    if not filters:
+        raise SupabaseError("delete_where refuses to run without filters")
+    r = requests.delete(f"{url}/rest/v1/{table}",
+                        headers={"apikey": key, "Authorization": f"Bearer {key}",
+                                 "Prefer": "return=minimal"},
+                        params=filters, timeout=TIMEOUT)
+    if not r.ok:
+        raise SupabaseError(f"delete {table}: {r.status_code} {r.text[:300]}")
+
+
 def log_run(slate_date, run_type, stage, status, detail=None, started_at=None) -> None:
     """Record a pipeline run — this is what powers the dashboard's 'last updated'."""
     row = pd.DataFrame([{

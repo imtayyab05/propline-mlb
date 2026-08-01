@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .db import upsert
+from .db import delete_where, upsert
 
 # signals stored alongside each pick so the dashboard can show the "why" without
 # recomputing anything
@@ -64,6 +64,7 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
     if lineups is not None and not lineups.empty:
         cols = ["game_pk", "game_date", "team_id", "team", "opponent_id", "home_away",
                 "batting_order", "player_id", "player_name", "position", "status"]
+        delete_where("lineups", {"game_date": f"eq.{slate_date}"})
         written["lineups"] = upsert("lineups", _ints(lineups[[c for c in cols if c in lineups]]),
                                     on_conflict="game_pk,team_id,batting_order")
 
@@ -105,6 +106,11 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
     if picks:
         allp = pd.concat(picks, ignore_index=True).drop_duplicates(
             subset=["slate_date", "prop", "subject_id"])
+        # Clear the slate's board first. Upserting alone leaves anyone who was in the
+        # top N earlier but dropped out since, keeping their old rank and score — the
+        # board then reads as a blend of runs, with duplicate ranks, scores out of
+        # order, and stale "projected" badges on a confirmed slate.
+        delete_where("prop_picks", {"slate_date": f"eq.{slate_date}"})
         written["prop_picks"] = upsert("prop_picks", _ints(allp),
                                        on_conflict="slate_date,prop,subject_id")
 
@@ -131,6 +137,7 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
     if frames:
         allg = pd.concat(frames, ignore_index=True).drop_duplicates(
             subset=["slate_date", "prop", "game_pk", "subject"])
+        delete_where("game_picks", {"slate_date": f"eq.{slate_date}"})
         written["game_picks"] = upsert("game_picks", _ints(allg),
                                        on_conflict="slate_date,prop,game_pk,subject")
 
