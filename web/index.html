@@ -94,7 +94,8 @@
       <option value="projected">Projected only</option>
     </select>
     <div class="spacer"></div>
-    <button id="csv">Download CSV</button>
+    <button id="xlsx" title="The full generated workbook: every category on its own tab">Download Excel</button>
+    <button id="csv" title="Just the rows currently shown, as CSV">Download CSV</button>
   </div>
 
   <div class="wrap">
@@ -277,6 +278,34 @@ function render(){
   $('#empty').classList.toggle('hidden', data.length > 0);
 }
 
+// The workbook is uploaded to storage by each publishing run, under a predictable
+// name. HEAD it rather than linking blindly, so the button disables itself on a slate
+// whose run has not finished instead of handing the client a 404.
+function workbookUrl(){
+  return `${CFG.supabaseUrl}/storage/v1/object/public/picks/props_${slateDate}.xlsx`;
+}
+
+async function checkWorkbook(){
+  const btn = $('#xlsx');
+  if (!slateDate){ btn.disabled = true; return; }
+  try{
+    const r = await fetch(workbookUrl(), {method:'HEAD'});
+    btn.disabled = !r.ok;
+    btn.title = r.ok
+      ? 'The full generated workbook: every category on its own tab'
+      : 'No workbook for this slate yet — it appears once a run finishes';
+  }catch{
+    btn.disabled = true;
+  }
+}
+
+function downloadXlsx(){
+  const a = document.createElement('a');
+  a.href = workbookUrl();
+  a.download = `props_${slateDate}.xlsx`;
+  a.click();
+}
+
 function downloadCsv(){
   const data = filtered();
   if (!data.length) return toast('Nothing to export.');
@@ -329,6 +358,7 @@ async function refresh(){
   try{
     await loadFreshness();
     await loadProp();
+    await checkWorkbook();
   }catch(e){ toast(e.message, 8000); }
 }
 
@@ -356,6 +386,7 @@ async function init(){
   $('#refresh').addEventListener('click', refresh);
   $('#update').addEventListener('click', updateNow);
   $('#csv').addEventListener('click', downloadCsv);
+  $('#xlsx').addEventListener('click', downloadXlsx);
 
   await loadSlates();
   await refresh();

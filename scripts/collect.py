@@ -28,7 +28,8 @@ from propline.db import load_env, log_run  # noqa: E402
 from propline.intermediate import build_intermediate  # noqa: E402
 from propline.mlb import (get_bullpen_usage, get_lineups, get_schedule)  # noqa: E402
 from propline.rolling import rolling_batter_splits  # noqa: E402
-from propline.savant import pull_leaderboards, pull_statcast_search  # noqa: E402
+from propline.savant import (pull_leaderboards, pull_park_factors,  # noqa: E402
+                             pull_statcast_search)
 
 
 def main() -> int:
@@ -99,6 +100,18 @@ def main() -> int:
         print(f"  ok    rolling splits: {len(rolling)} rows")
     else:
         print("\n[3/5] Raw pitch data — SKIPPED (no L5/L10 this run)")
+
+    # 3b. Park factors. Cheap and they barely move during a season, so reuse the file
+    # when it is already there — but never skip it entirely, or every game silently
+    # scores as a neutral park and the dashboard reads "no park data" on every row.
+    pf_path = raw_dir / "park_factors.csv"
+    if pf_path.exists():
+        print("\n  ok    park_factors: reusing today's file")
+    else:
+        try:
+            pull_park_factors(year, raw_dir)
+        except Exception as exc:  # noqa: BLE001 — a park miss must not sink the run
+            print(f"  WARN  park factors unavailable ({exc}); parks will score as neutral")
 
     # 4. Schedule, lineups, bullpen
     print("\n[4/5] Schedule / lineups / bullpen")

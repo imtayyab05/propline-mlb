@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
 from propline.publish import publish_slate  # noqa: E402
+from propline.storage import upload_workbook  # noqa: E402
 from propline.rationale import add_rationales, label_internal_indexes  # noqa: E402
 from propline.mlb import get_player_names  # noqa: E402
 from propline.output import build_picks_workbook  # noqa: E402
@@ -170,6 +171,16 @@ def main() -> int:
                                     top_n=args.top)
             for table, n in written.items():
                 print(f"  ok    {table:16} {n} rows")
+
+            # The workbook is generated on a runner that disappears when the job ends,
+            # so it goes to storage — that is what the dashboard's Download Excel
+            # button points at. A failed upload must not fail an otherwise good run.
+            try:
+                link = upload_workbook(out, day)
+                print(f"  ok    workbook uploaded")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  WARN  workbook upload failed: {exc}")
+
             log_run(day, args.run_kind, "processing", "ok",
                     detail=", ".join(f"{k}={v}" for k, v in written.items()),
                     started_at=started)
