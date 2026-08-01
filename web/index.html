@@ -174,8 +174,18 @@
   .reveal[data-d="2"]{transition-delay:.18s}
   .reveal[data-d="3"]{transition-delay:.27s}
 
+  /* ── routing ─────────────────────────────────────────────────────────────
+     Two views, one on screen at a time, crossfaded. Hash-based rather than
+     pushState paths: Netlify would 404 on a refresh of /board without a
+     catch-all redirect, and a catch-all risks swallowing the /api/* function
+     routes. A hash costs nothing and cannot break the API. */
+  .view{display:none;opacity:0;transition:opacity .32s var(--ease)}
+  .view.active{display:block;opacity:1}
+  .view.leaving{opacity:0}
+  body.switching{overflow:hidden}
+
   /* ── dashboard ───────────────────────────────────────────────────────── */
-  #app{position:relative;z-index:1;background:var(--bg);scroll-margin-top:0}
+  #app{position:relative;z-index:1;background:var(--bg)}
   header{
     background:rgba(20,26,38,.82);backdrop-filter:blur(14px);
     border-bottom:1px solid var(--line);padding:14px 20px;
@@ -263,6 +273,27 @@
          font-size:13px;display:flex;gap:14px;flex-wrap:wrap;
          max-width:1500px;margin:0 auto}
 
+  /* ── modal ───────────────────────────────────────────────────────────── */
+  .scrim{
+    position:fixed;inset:0;z-index:70;display:grid;place-items:center;padding:24px;
+    background:rgba(6,9,14,.72);backdrop-filter:blur(4px);
+    opacity:0;pointer-events:none;transition:opacity .28s var(--ease);
+  }
+  .scrim.show{opacity:1;pointer-events:auto}
+  .modal{
+    width:min(430px,100%);background:var(--panel);border:1px solid var(--line);
+    border-radius:16px;padding:26px;box-shadow:0 26px 70px rgba(0,0,0,.6);
+    transform:translateY(12px) scale(.98);
+    transition:transform .32s var(--ease);
+  }
+  .scrim.show .modal{transform:none}
+  .modal h3{margin:0 0 8px;font-size:19px;letter-spacing:-.01em}
+  .modal p{margin:0 0 18px;color:var(--muted);font-size:14px}
+  .modal input{width:100%;margin-bottom:14px}
+  .modal .err{color:var(--bad);font-size:13px;margin:-8px 0 12px;display:none}
+  .modal .err.show{display:block}
+  .modal-actions{display:flex;gap:10px;justify-content:flex-end}
+
   /* Anyone who has asked their OS to calm animations down gets a static site.
      Everything still works; it just stops moving. */
   @media (prefers-reduced-motion: reduce){
@@ -276,7 +307,8 @@
 
 <div class="glow" id="glow"></div>
 
-<!-- ── hero ──────────────────────────────────────────────────────────── -->
+<!-- ── landing view ──────────────────────────────────────────────────── -->
+<div class="view" id="view-landing">
 <section class="hero" id="hero">
   <nav class="hero-nav">
     <div class="mark" data-top>PropLine MLB</div>
@@ -329,9 +361,10 @@
     </div>
   </div>
 </section>
+</div>
 
-<!-- ── dashboard ─────────────────────────────────────────────────────── -->
-<div id="app">
+<!-- ── dashboard view ────────────────────────────────────────────────── -->
+<div class="view" id="app">
 <header id="hdr">
   <div class="row">
     <div class="brand" data-top>Prop<span>Line</span> MLB</div>
@@ -379,6 +412,23 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Confirm / passphrase dialog. Replaces the browser prompt(), which cannot be
+     styled and looks alarming for a routine action. -->
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mt">
+    <h3 id="mt">Start a pipeline run?</h3>
+    <p id="mbody">This re-pulls today's data and rebuilds every board.
+       It takes roughly 5–10 minutes.</p>
+    <input id="msecret" type="password" placeholder="Passphrase" class="hidden"
+           autocomplete="current-password">
+    <div class="err" id="merr"></div>
+    <div class="modal-actions">
+      <button id="mcancel">Cancel</button>
+      <button id="mok" class="primary">Start run</button>
+    </div>
+  </div>
+</div>
 
 <!-- Local development only; absent when hosted, where /api/config supplies the values.
      onerror keeps the console clean when the file legitimately does not exist. -->
@@ -441,8 +491,10 @@ function initGlow(){
   }, {passive:true});
 }
 
+// Safe to call on every view change: anything already revealed is skipped, so
+// re-entering the landing page does not replay the animation.
 function initReveal(){
-  const els = [...document.querySelectorAll('.reveal')];
+  const els = [...document.querySelectorAll('.reveal:not(.in)')];
   if (!els.length) return;
 
   // No observer support, or motion turned down at the OS level: show everything
@@ -474,23 +526,106 @@ function initHeader(){
   }, {passive:true});
 }
 
-// Devin opens this every morning; making him scroll past a hero each time would
-// get old fast. So the hero is shown once, then remembered — the wordmark in
-// either bar always takes him back to it.
+/* ── router ─────────────────────────────────────────────────────────────
+   Two views that swap, rather than one long scroll. The board is the working
+   surface and gets the whole window; the landing page is the front door.
+   Uses the hash so a refresh, a bookmark and the back button all behave, with
+   no server-side rewrite that could interfere with the /api/* functions. */
+
+let currentView = null;
+
+function showView(name, animate=true){
+  if (currentView === name) return;
+  const next = name === 'board' ? $('#app') : $('#view-landing');
+  const prev = currentView === 'board' ? $('#app')
+             : currentView ? $('#view-landing') : null;
+
+  const paint = () => {
+    if (prev){ prev.classList.remove('active','leaving'); }
+    next.classList.add('active');
+    // start each view at the top; a view arriving mid-scroll feels broken
+    scrollTo({top:0, behavior:'auto'});
+    currentView = name;
+    document.body.classList.remove('switching');
+    // Reveal animations belong to whichever view just appeared. Called directly
+    // rather than inside rAF: a backgrounded tab never runs rAF, which would
+    // leave the copy hidden until the failsafe fired.
+    initReveal();
+  };
+
+  if (!prev || !animate){ paint(); return; }
+
+  document.body.classList.add('switching');
+  prev.classList.add('leaving');
+  // fall back to a timer so a missed transitionend can never strand the user
+  let done = false;
+  const finish = () => { if (done) return; done = true; paint(); };
+  prev.addEventListener('transitionend', finish, {once:true});
+  setTimeout(finish, 420);
+}
+
+function routeFromHash(animate){
+  showView(location.hash === '#board' ? 'board' : 'landing', animate);
+}
+
 function initNav(){
   document.querySelectorAll('[data-enter]').forEach(b=>
     b.addEventListener('click', ()=>{
       localStorage.setItem('propline_seen', '1');
-      $('#app').scrollIntoView({behavior:'smooth'});
+      location.hash = '#board';
     }));
   document.querySelectorAll('[data-top]').forEach(b=>
-    b.addEventListener('click', ()=>
-      scrollTo({top:0, behavior:'smooth'})));
+    b.addEventListener('click', ()=>{
+      // history.back would be wrong when the board was opened directly
+      location.hash = '';
+    }));
 
-  if (localStorage.getItem('propline_seen')){
-    // jump, do not animate — an unrequested scroll on load is disorienting
-    requestAnimationFrame(()=>$('#app').scrollIntoView({behavior:'auto'}));
+  addEventListener('hashchange', ()=>routeFromHash(true));
+
+  // Devin opens this every morning and should land on the board, not on a
+  // splash screen he has already read. First visit gets the front door.
+  if (!location.hash && localStorage.getItem('propline_seen')){
+    history.replaceState(null, '', '#board');
   }
+  routeFromHash(false);
+}
+
+/* ── confirm / passphrase dialog ────────────────────────────────────────
+   The passphrase stays: /api/trigger is a public URL, and without a gate
+   anyone who finds it can spend the client's GitHub Actions minutes and
+   hammer Baseball Savant from his account. But it is asked for once, inside
+   the dialog, instead of through a browser prompt() on every run. */
+
+function askRun({needSecret, error}){
+  return new Promise(resolve=>{
+    const scrim = $('#scrim'), input = $('#msecret'), err = $('#merr');
+    input.classList.toggle('hidden', !needSecret);
+    input.value = '';
+    $('#mbody').textContent = needSecret
+      ? 'Enter the passphrase to start a run. It is remembered on this device, so you will only be asked once.'
+      : "This re-pulls today's data and rebuilds every board. It takes roughly 5–10 minutes.";
+    err.textContent = error || '';
+    err.classList.toggle('show', !!error);
+
+    scrim.classList.add('show');
+    if (needSecret) setTimeout(()=>input.focus(), 260);
+
+    const close = value => {
+      scrim.classList.remove('show');
+      document.removeEventListener('keydown', onKey);
+      resolve(value);
+    };
+    const ok = () => close(needSecret ? (input.value.trim() || null) : true);
+    const onKey = e => {
+      if (e.key === 'Escape') close(null);
+      if (e.key === 'Enter' && scrim.classList.contains('show')) ok();
+    };
+
+    $('#mok').onclick = ok;
+    $('#mcancel').onclick = () => close(null);
+    scrim.onclick = e => { if (e.target === scrim) close(null); };
+    document.addEventListener('keydown', onKey);
+  });
 }
 
 /* ── data ──────────────────────────────────────────────────────────────── */
@@ -680,21 +815,20 @@ function downloadCsv(){
   a.click(); URL.revokeObjectURL(a.href);
 }
 
-// The passphrase is asked for once and kept in this browser only. It never travels
-// anywhere except to our own /api/trigger endpoint.
-function passphrase(force){
-  let p = force ? null : localStorage.getItem('propline_secret');
-  if (!p){
-    p = prompt('Passphrase to start a pipeline run:');
-    if (p) localStorage.setItem('propline_secret', p);
-  }
-  return p;
-}
-
+// The passphrase is kept in this browser only. It never travels anywhere except
+// to our own /api/trigger endpoint.
 async function updateNow(){
   const btn = $('#update');
-  const secret = passphrase(false);
-  if (secret === null) return;
+  let secret = localStorage.getItem('propline_secret');
+
+  // Known passphrase -> plain confirmation. Unknown -> ask for it in the same
+  // dialog, so there is never a browser prompt.
+  const answer = await askRun({needSecret: !secret});
+  if (answer === null) return;
+  if (!secret){
+    secret = answer;
+    localStorage.setItem('propline_secret', secret);
+  }
 
   btn.disabled = true; btn.textContent = 'Starting…';
   try{
@@ -703,8 +837,12 @@ async function updateNow(){
       body: JSON.stringify({slate_date: slateDate})});
     const body = await r.json().catch(()=>({}));
     if (r.status === 401){
+      // forget it and re-ask immediately, with the reason shown in the dialog
       localStorage.removeItem('propline_secret');
-      throw new Error('Passphrase rejected — click Update Now to try again.');
+      btn.disabled = false; btn.textContent = 'Update Now';
+      const retry = await askRun({needSecret:true, error:'That passphrase was rejected.'});
+      if (retry){ localStorage.setItem('propline_secret', retry); return updateNow(); }
+      return;
     }
     if (!r.ok) throw new Error(body.hint || body.error || `HTTP ${r.status}`);
     toast('Pipeline started. It takes roughly 5–10 minutes; hit Refresh after that.', 8000);
@@ -724,7 +862,8 @@ async function refresh(){
 }
 
 async function init(){
-  paintChips(); initGlow(); initReveal(); initHeader(); initNav();
+  // initNav routes to a view, and showView triggers the reveal pass for it
+  paintChips(); initGlow(); initHeader(); initNav();
 
   try{
     CFG = await loadConfig();
