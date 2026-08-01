@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PropLine MLB</title>
+<style>
+  :root{
+    --bg:#0f1319; --panel:#171d26; --panel2:#1e2634; --line:#2a3444;
+    --text:#e8edf5; --muted:#93a1b5; --accent:#4ea1ff; --good:#3ecf8e;
+    --warn:#f5b942; --bad:#ff6b6b; --radius:10px;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f4f6fa; --panel:#fff; --panel2:#eef2f8; --line:#dde3ec;
+           --text:#141a22; --muted:#5b6879; --accent:#0b69d4; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{background:var(--panel);border-bottom:1px solid var(--line);
+         padding:14px 20px;position:sticky;top:0;z-index:20}
+  .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .brand{font-size:19px;font-weight:700;letter-spacing:-.2px}
+  .brand span{color:var(--accent)}
+  .spacer{flex:1}
+  .meta{font-size:13px;color:var(--muted)}
+  .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11.5px;
+         font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+  .b-conf{background:rgba(62,207,142,.16);color:var(--good)}
+  .b-proj{background:rgba(245,185,66,.16);color:var(--warn)}
+  .b-err{background:rgba(255,107,107,.16);color:var(--bad)}
+  button,select,input{font:inherit;color:var(--text);background:var(--panel2);
+        border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+  button{cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  main{padding:18px 20px;max-width:1500px;margin:0 auto}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+  .tab{padding:7px 14px;border-radius:8px;background:var(--panel);
+       border:1px solid var(--line);cursor:pointer;font-size:14px}
+  .tab.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .wrap{background:var(--panel);border:1px solid var(--line);
+        border-radius:var(--radius);overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:14px;min-width:760px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);
+        white-space:nowrap}
+  th{background:var(--panel2);font-size:12px;text-transform:uppercase;
+     letter-spacing:.5px;color:var(--muted);font-weight:600;
+     position:sticky;top:0}
+  tbody tr:hover{background:var(--panel2)}
+  tbody tr:last-child td{border-bottom:none}
+  .rank{color:var(--muted);font-variant-numeric:tabular-nums;width:44px}
+  .name{font-weight:600}
+  .score{font-weight:700;font-variant-numeric:tabular-nums}
+  .why{white-space:normal;color:var(--muted);min-width:290px;max-width:460px;
+       font-size:13.5px}
+  .num{font-variant-numeric:tabular-nums;color:var(--muted)}
+  .empty{padding:40px;text-align:center;color:var(--muted)}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+         background:var(--panel);border:1px solid var(--line);padding:11px 18px;
+         border-radius:9px;box-shadow:0 8px 28px rgba(0,0,0,.35);z-index:50;
+         max-width:90vw}
+  .hidden{display:none}
+  .thin{color:var(--warn)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="row">
+    <div class="brand">Prop<span>Line</span> MLB</div>
+    <select id="slate" title="Slate date"></select>
+    <div class="spacer"></div>
+    <div class="meta" id="freshness">loading…</div>
+    <button id="refresh">Refresh</button>
+    <button id="update" class="primary" title="Re-run the full pipeline now">Update Now</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="meta" id="slateinfo"></div>
+  </div>
+</header>
+
+<main>
+  <div class="tabs" id="tabs"></div>
+
+  <div class="controls">
+    <input id="search" placeholder="Filter by player, team or opponent…" style="min-width:280px">
+    <select id="teamfilter"><option value="">All teams</option></select>
+    <select id="statusfilter">
+      <option value="">Any lineup status</option>
+      <option value="confirmed">Confirmed only</option>
+      <option value="projected">Projected only</option>
+    </select>
+    <div class="spacer"></div>
+    <button id="csv">Download CSV</button>
+  </div>
+
+  <div class="wrap">
+    <table>
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty hidden" id="empty">Nothing to show for this slate yet.</div>
+  </div>
+</main>
+
+<div class="toast hidden" id="toast"></div>
+
+<!-- Local development only; absent when hosted, where /api/config supplies the values.
+     onerror keeps the console clean when the file legitimately does not exist. -->
+<script src="config.local.js" onerror="void 0"></script>
+
+<script>
+const PROPS = [
+  {key:'hits',         label:'Hits',        kind:'player'},
+  {key:'total_bases',  label:'Total Bases', kind:'player'},
+  {key:'home_runs',    label:'Home Runs',   kind:'player'},
+  {key:'rbis',         label:'RBIs',        kind:'player'},
+  {key:'runs',         label:'Runs',        kind:'player'},
+  {key:'strikeouts',   label:'Strikeouts',  kind:'player'},
+  {key:'game_total',   label:'Game Totals', kind:'game'},
+  {key:'team_total',   label:'Team Totals', kind:'game'},
+];
+
+let CFG = null, current = 'total_bases', rows = [], slateDate = null;
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg, ms=4200){
+  const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
+  clearTimeout(toast._t); toast._t = setTimeout(()=>t.classList.add('hidden'), ms);
+}
+
+async function loadConfig(){
+  // Hosted: /api/config serves the public values from environment variables, so the
+  // repo never contains even the publishable key. Local: drop a git-ignored
+  // web/config.local.js that sets window.PROPLINE_CONFIG.
+  if (window.PROPLINE_CONFIG) return window.PROPLINE_CONFIG;
+  const r = await fetch('/api/config');
+  if (!r.ok) throw new Error('No config. Create web/config.local.js for local use.');
+  return r.json();
+}
+
+async function sb(table, params){
+  const url = new URL(`${CFG.supabaseUrl}/rest/v1/${table}`);
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+  const r = await fetch(url, {headers:{
+    apikey: CFG.supabaseAnonKey,
+    Authorization: `Bearer ${CFG.supabaseAnonKey}`,
+  }});
+  if (!r.ok) throw new Error(`${table}: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+async function loadSlates(){
+  const runs = await sb('pipeline_runs',
+    {select:'slate_date', order:'slate_date.desc', limit:60});
+  const dates = [...new Set(runs.map(r=>r.slate_date))];
+  const sel = $('#slate');
+  sel.innerHTML = dates.map(d=>`<option value="${d}">${d}</option>`).join('')
+                  || '<option>no data</option>';
+  slateDate = slateDate && dates.includes(slateDate) ? slateDate : dates[0];
+  if (slateDate) sel.value = slateDate;
+}
+
+async function loadFreshness(){
+  if (!slateDate) return;
+  const runs = await sb('pipeline_runs', {select:'*', slate_date:`eq.${slateDate}`,
+                                          order:'id.desc', limit:20});
+  const last = runs[0];
+  if (!last){ $('#freshness').textContent = 'never run'; return; }
+
+  const when = new Date(last.finished_at);
+  const mins = Math.round((Date.now() - when) / 60000);
+  const ago = mins < 1 ? 'just now'
+            : mins < 60 ? `${mins} min ago`
+            : `${Math.floor(mins/60)}h ${mins%60}m ago`;
+  const failed = runs.some(r => r.status === 'failed' && r.slate_date === slateDate
+                                && r.id > (runs.find(x=>x.status==='ok')?.id ?? -1));
+  $('#freshness').innerHTML =
+    `updated <strong>${ago}</strong> · ${esc(last.run_type)}` +
+    (failed ? ' <span class="badge b-err">last run failed</span>' : '');
+
+  // lineup confirmation state for this slate
+  const lu = await sb('lineups', {select:'status', slate_date:`eq.${slateDate}`,
+                                  limit:1}).catch(()=>[]);
+  const counts = await sb('lineups',
+    {select:'status', game_date:`eq.${slateDate}`}).catch(()=>[]);
+  const conf = counts.filter(r=>r.status==='confirmed').length;
+  const proj = counts.filter(r=>r.status==='projected').length;
+  const games = await sb('games', {select:'game_pk', game_date:`eq.${slateDate}`})
+                      .catch(()=>[]);
+  $('#slateinfo').innerHTML =
+    `${games.length} games · ` +
+    (conf ? `<span class="badge b-conf">${conf} confirmed</span> ` : '') +
+    (proj ? `<span class="badge b-proj">${proj} projected</span>` : '') +
+    (proj && !conf ? ' — confirmed lineups post 2–4h before first pitch' : '');
+}
+
+async function loadProp(){
+  const prop = PROPS.find(p=>p.key===current);
+  const table = prop.kind === 'player' ? 'prop_picks' : 'game_picks';
+  rows = await sb(table, {select:'*', slate_date:`eq.${slateDate}`,
+                          prop:`eq.${current}`, order:'rank.asc'});
+  buildTeamFilter();
+  render();
+}
+
+function buildTeamFilter(){
+  const teams = [...new Set(rows.map(r=>r.team).filter(Boolean))].sort();
+  const sel = $('#teamfilter'), keep = sel.value;
+  sel.innerHTML = '<option value="">All teams</option>' +
+    teams.map(t=>`<option>${esc(t)}</option>`).join('');
+  if (teams.includes(keep)) sel.value = keep;
+}
+
+function filtered(){
+  const q = $('#search').value.trim().toLowerCase();
+  const team = $('#teamfilter').value;
+  const status = $('#statusfilter').value;
+  return rows.filter(r=>{
+    const hay = [r.subject_name, r.subject, r.team, r.opponent, r.venue]
+                  .filter(Boolean).join(' ').toLowerCase();
+    if (q && !hay.includes(q)) return false;
+    if (team && r.team !== team) return false;
+    if (status && (r.lineup_status||'') !== status) return false;
+    return true;
+  });
+}
+
+function render(){
+  const prop = PROPS.find(p=>p.key===current);
+  const data = filtered();
+  const isPlayer = prop.kind === 'player';
+
+  $('#thead').innerHTML = isPlayer
+    ? `<tr><th>#</th><th>${current==='strikeouts'?'Pitcher':'Player'}</th><th>Team</th>
+       <th>${current==='strikeouts'?'Opponent':'Opposing SP'}</th><th>Score</th>
+       <th>Lineup</th><th>Recent</th><th>Why</th></tr>`
+    : `<tr><th>#</th><th>Matchup</th><th>Venue</th><th>Score</th>
+       <th>Park Runs</th><th>Why</th></tr>`;
+
+  $('#tbody').innerHTML = data.map(r=>{
+    const d = r.details || {};
+    if (!isPlayer){
+      const pf = r.park_runs ?? '—';
+      const flag = r.park_matched === false ? ' <span class="thin">(no park data)</span>' : '';
+      return `<tr>
+        <td class="rank">${r.rank}</td>
+        <td class="name">${esc(r.subject)}</td>
+        <td class="num">${esc(r.venue||'')}</td>
+        <td class="score">${r.score}</td>
+        <td class="num">${pf}${flag}</td>
+        <td class="why">${esc(r.rationale||'')}</td></tr>`;
+    }
+    const games = d.recent_games;
+    const thin = games != null && games < 7;
+    const badge = r.lineup_status === 'confirmed'
+      ? '<span class="badge b-conf">confirmed</span>'
+      : r.lineup_status === 'projected'
+        ? '<span class="badge b-proj">projected</span>' : '';
+    return `<tr>
+      <td class="rank">${r.rank}</td>
+      <td class="name">${esc(r.subject_name)}</td>
+      <td class="num">${esc(r.team||'')}</td>
+      <td class="num">${esc(r.opponent||'')}</td>
+      <td class="score">${r.score}</td>
+      <td>${badge}</td>
+      <td class="num ${thin?'thin':''}">${games!=null?`${games} G`:'—'}</td>
+      <td class="why">${esc(r.rationale||'')}</td></tr>`;
+  }).join('');
+
+  $('#empty').classList.toggle('hidden', data.length > 0);
+}
+
+function downloadCsv(){
+  const data = filtered();
+  if (!data.length) return toast('Nothing to export.');
+  const cols = Object.keys(data[0]).filter(c=>c!=='details');
+  const cell = v => `"${String(v??'').replace(/"/g,'""')}"`;
+  const csv = [cols.join(','),
+    ...data.map(r=>cols.map(c=>cell(r[c])).join(','))].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+  a.download = `propline_${current}_${slateDate}.csv`;
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+// The passphrase is asked for once and kept in this browser only. It never travels
+// anywhere except to our own /api/trigger endpoint.
+function passphrase(force){
+  let p = force ? null : localStorage.getItem('propline_secret');
+  if (!p){
+    p = prompt('Passphrase to start a pipeline run:');
+    if (p) localStorage.setItem('propline_secret', p);
+  }
+  return p;
+}
+
+async function updateNow(){
+  const btn = $('#update');
+  const secret = passphrase(false);
+  if (secret === null) return;
+
+  btn.disabled = true; btn.textContent = 'Starting…';
+  try{
+    const r = await fetch('/api/trigger', {method:'POST',
+      headers:{'Content-Type':'application/json', 'X-Update-Secret': secret || ''},
+      body: JSON.stringify({slate_date: slateDate})});
+    const body = await r.json().catch(()=>({}));
+    if (r.status === 401){
+      localStorage.removeItem('propline_secret');
+      throw new Error('Passphrase rejected — click Update Now to try again.');
+    }
+    if (!r.ok) throw new Error(body.hint || body.error || `HTTP ${r.status}`);
+    toast('Pipeline started. It takes roughly 5–10 minutes; hit Refresh after that.', 8000);
+  }catch(e){
+    toast(`Could not start the run: ${e.message}`, 8000);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Update Now';
+  }
+}
+
+async function refresh(){
+  try{
+    await loadFreshness();
+    await loadProp();
+  }catch(e){ toast(e.message, 8000); }
+}
+
+async function init(){
+  try{
+    CFG = await loadConfig();
+  }catch(e){
+    document.body.innerHTML =
+      `<div class="empty" style="padding:60px">${esc(e.message)}</div>`;
+    return;
+  }
+
+  $('#tabs').innerHTML = PROPS.map(p=>
+    `<div class="tab${p.key===current?' on':''}" data-k="${p.key}">${p.label}</div>`).join('');
+  $('#tabs').addEventListener('click', e=>{
+    const t = e.target.closest('.tab'); if(!t) return;
+    current = t.dataset.k;
+    document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on', x===t));
+    loadProp().catch(err=>toast(err.message));
+  });
+
+  ['search','teamfilter','statusfilter'].forEach(id=>
+    $('#'+id).addEventListener('input', render));
+  $('#slate').addEventListener('change', e=>{ slateDate = e.target.value; refresh(); });
+  $('#refresh').addEventListener('click', refresh);
+  $('#update').addEventListener('click', updateNow);
+  $('#csv').addEventListener('click', downloadCsv);
+
+  await loadSlates();
+  await refresh();
+}
+
+init();
+</script>
+</body>
+</html>

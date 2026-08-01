@@ -24,6 +24,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from propline.db import load_env, log_run  # noqa: E402
 from propline.intermediate import build_intermediate  # noqa: E402
 from propline.mlb import (get_bullpen_usage, get_lineups, get_schedule)  # noqa: E402
 from propline.rolling import rolling_batter_splits  # noqa: E402
@@ -38,8 +39,11 @@ def main() -> int:
     ap.add_argument("--raw-days", type=int, default=21,
                     help="days of raw pitch data to pull for rolling splits")
     ap.add_argument("--skip-raw", action="store_true")
+    ap.add_argument("--run-kind", default="manual")
     args = ap.parse_args()
+    load_env()
 
+    started = datetime.now()
     day = args.date
     as_of = datetime.strptime(day, "%Y-%m-%d").date()
     year = as_of.year
@@ -93,6 +97,17 @@ def main() -> int:
     print(f"  ok    {out_xlsx}  ({len(sheets)} sheets)")
 
     failed = manifest[~manifest.ok]
+
+    # Recorded so a collection failure is visible on the dashboard rather than only in
+    # the Actions log — the processing step would otherwise run on stale data and look
+    # perfectly healthy.
+    ok_pulls = int(manifest.ok.sum())
+    log_run(day, args.run_kind, "collection",
+            "ok" if ok_pulls == len(manifest) else "partial",
+            detail=(f"{ok_pulls}/{len(manifest)} pulls, {len(lineups)} lineup slots, "
+                    f"{len(bullpen)} relievers, {len(sheets)} sheets"),
+            started_at=started)
+
     print(f"\n{'='*66}")
     print(f"season pulls: {int(manifest.ok.sum())}/{len(manifest)} | "
           f"lineups: {len(lineups)} | bullpen: {len(bullpen)} | sheets: {len(sheets)}")

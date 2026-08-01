@@ -1,0 +1,8 @@
+# Pinned to the versions the pipeline was built and verified against.
+# Loose pins (>=) would let a future pandas release silently change groupby or
+# dtype behaviour mid-season, which is exactly the kind of quiet breakage this
+# project cannot afford.
+pandas==2.2.3
+requests==2.32.3
+openpyxl==3.1.5
+python-dotenv==1.1.0

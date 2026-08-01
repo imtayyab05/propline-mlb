@@ -35,7 +35,18 @@ FIELD_GLOSSARY = """Field meanings:
 - recent_k_per_game / recent_k_pct / recent_whiff_pct: the pitcher's recent strikeout form
 - opp_lineup_k_pct: how often the opposing lineup strikes out
 - park_runs: park run factor, 100 = neutral, higher favours hitters
-- recent_games: how many games the recent numbers cover (fewer = less reliable)"""
+- recent_games: how many games the recent numbers cover (fewer = less reliable)
+
+Team and game total fields are INTERNAL INDEXES on arbitrary scales. Never quote their
+raw values — they mean nothing to a reader. Describe what they imply instead:
+- combined_offense / lineup_matchup_woba: how well the lineup(s) project against the
+  starting pitching they face. Say "both lineups project well against tonight's
+  starters", not "combined offense of 0.674".
+- combined_bullpen_tired / opp_bullpen_tired: 0 = fully rested pen, 1 = most arms
+  worked recently. Say "the pen is short-handed" or "the pen is rested".
+- opp_starter_weak: how much the opposing starter gives up. Say "a starter who has
+  been hittable", not the number.
+park_runs and named pitchers ARE real and may be quoted directly."""
 
 SYSTEM = (
     "You write one-sentence explanations for baseball prop shortlists.\n"
@@ -62,6 +73,27 @@ SYSTEM = (
 
 def _payload(rows: list[dict]) -> str:
     return json.dumps({"picks": rows}, default=str)
+
+
+def label_internal_indexes(df: pd.DataFrame, mapping: dict[str, tuple[str, str, str]]
+                          ) -> pd.DataFrame:
+    """Replace arbitrary internal indexes with plain-English bands.
+
+    Telling the model "don't quote this number" does not reliably work — it quoted
+    "0.674 combined offense" anyway. So the number never gets sent: each index is
+    converted to a word based on where it sits across today's slate, and only the word
+    is passed on. Deterministic, and impossible for the model to misread.
+
+    mapping: {column: (low_label, mid_label, high_label)}
+    """
+    out = df.copy()
+    for col, (lo, mid, hi) in mapping.items():
+        if col not in out.columns:
+            continue
+        pct = out[col].rank(pct=True)
+        out[col + "_desc"] = pct.map(
+            lambda p: lo if pd.isna(p) or p < 0.34 else (mid if p < 0.67 else hi))
+    return out
 
 
 RATE_LIMIT_RETRIES = 4
@@ -131,7 +163,11 @@ def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
         for f in fields:
             if f in r.index and pd.notna(r[f]):
                 v = r[f]
-                item[f] = round(float(v), 3) if isinstance(v, (int, float)) else str(v)
+                if isinstance(v, (int, float)):
+                    # keep whole numbers whole, or the model writes "a 104.0 park"
+                    item[f] = int(v) if float(v).is_integer() else round(float(v), 3)
+                else:
+                    item[f] = str(v)
         rows.append(item)
 
     texts: dict[int, str] = {}

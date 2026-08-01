@@ -14,3 +14,6 @@ __pycache__/
 
 # excel lockfiles
 ~$*.xlsx
+
+# local dashboard config (contains the publishable key only, still not committed)
+web/config.local.js

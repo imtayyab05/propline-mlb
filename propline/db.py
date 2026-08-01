@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,7 @@ import requests
 
 BATCH = 500          # rows per request; keeps payloads well under any body limit
 TIMEOUT = 120
+RETRIES = 3          # transient network/5xx only; 4xx is never retried
 
 
 class SupabaseError(RuntimeError):
@@ -89,10 +91,30 @@ def upsert(table: str, df: pd.DataFrame, on_conflict: str | None = None,
     sent = 0
     for i in range(0, len(records), chunk):
         batch = records[i:i + chunk]
-        r = requests.post(endpoint, params=params, headers=headers,
-                          data=json.dumps(batch, default=str), timeout=TIMEOUT)
-        if not r.ok:
-            raise SupabaseError(f"{table}: {r.status_code} {r.text[:400]}")
+        payload = json.dumps(batch, default=str)
+
+        # Transient network failures are a fact of life on a scheduled cloud runner —
+        # a dropped connection mid-publish already cost one run here. Retry the
+        # connection-level failures and genuine server errors; never retry a 4xx,
+        # which means our data is wrong and will be wrong again next time.
+        last = None
+        for attempt in range(1, RETRIES + 1):
+            try:
+                r = requests.post(endpoint, params=params, headers=headers,
+                                  data=payload, timeout=TIMEOUT)
+                if r.ok:
+                    last = None
+                    break
+                if 400 <= r.status_code < 500:
+                    raise SupabaseError(f"{table}: {r.status_code} {r.text[:400]}")
+                last = SupabaseError(f"{table}: {r.status_code} {r.text[:200]}")
+            except requests.RequestException as exc:
+                last = SupabaseError(f"{table}: connection failed — {exc}")
+            if attempt < RETRIES:
+                time.sleep(2 ** attempt)
+        if last:
+            raise last
+
         sent += len(batch)
     return sent
 
@@ -109,6 +131,25 @@ def log_run(slate_date, run_type, stage, status, detail=None, started_at=None) -
     except SupabaseError as exc:
         # never let run-logging failure take down an otherwise good run
         print(f"  WARN  could not log run: {exc}")
+
+
+def read(table: str, params: dict | None = None, use_anon: bool = False) -> list[dict]:
+    """Read rows back out. Mainly for verification and debugging.
+
+    `use_anon=True` reads with the publishable key, i.e. exactly what the dashboard
+    sees — useful for catching row-level-security mistakes that the service key would
+    silently sail past.
+    """
+    url, service = _creds()
+    key = os.getenv("SUPABASE_ANON_KEY") if use_anon else service
+    if not key:
+        raise SupabaseError("SUPABASE_ANON_KEY missing — needed to read as the dashboard does")
+    r = requests.get(f"{url}/rest/v1/{table}",
+                     headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                     params=params or {"select": "*"}, timeout=TIMEOUT)
+    if not r.ok:
+        raise SupabaseError(f"{table}: {r.status_code} {r.text[:300]}")
+    return r.json()
 
 
 def health_check() -> bool:

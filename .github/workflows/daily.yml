@@ -1,0 +1,97 @@
+name: Daily slate
+
+# Two automatic runs a day, plus a manual trigger behind the dashboard's
+# "Update Now" button.
+#
+#   morning   13:00 UTC (09:00 ET) - full stats pull, PROJECTED lineups
+#   afternoon 21:00 UTC (17:00 ET) - re-pull, CONFIRMED lineups for the evening slate
+#
+# Confirmed lineups only post ~2-4h before first pitch, so the afternoon run is what
+# turns the morning's early read into verified picks. Day games starting ~13:05 ET are
+# the known gap: their lineups confirm around 11:00 ET, after the morning run and
+# before the afternoon one. Adding a third cron at 16:00 UTC would close that if the
+# client wants it.
+#
+# NOTE: GitHub's scheduled runs are best-effort and can be delayed under load. The
+# manual trigger exists partly as the escape hatch for that.
+
+on:
+  schedule:
+    - cron: '0 13 * * *'
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+    inputs:
+      slate_date:
+        description: 'Slate date (YYYY-MM-DD). Blank = today.'
+        required: false
+        type: string
+      window:
+        description: 'Recent-form window'
+        required: false
+        default: 'L10'
+        type: choice
+        options: ['L10', 'L5']
+
+# Never let two runs write the same slate at once.
+concurrency:
+  group: propline-slate
+  cancel-in-progress: false
+
+jobs:
+  slate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Work out which slate and which run this is
+        id: cfg
+        run: |
+          DATE="${{ inputs.slate_date }}"
+          if [ -z "$DATE" ]; then DATE=$(date -u +%F); fi
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            KIND=manual
+          elif [ "${{ github.event.schedule }}" = "0 13 * * *" ]; then
+            KIND=scheduled_morning
+          else
+            KIND=scheduled_afternoon
+          fi
+          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
+          echo "Slate $DATE ($KIND)"
+
+      - name: Collect
+        run: python scripts/collect.py --date "${{ steps.cfg.outputs.date }}"
+
+      - name: Process and publish
+        run: |
+          python scripts/process.py \
+            --date "${{ steps.cfg.outputs.date }}" \
+            --window "${{ inputs.window || 'L10' }}" \
+            --run-kind "${{ steps.cfg.outputs.kind }}" \
+            --publish
+
+      - name: Keep the picks workbook downloadable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: props-${{ steps.cfg.outputs.date }}
+          path: data/picks/*.xlsx
+          if-no-files-found: warn
+          retention-days: 30

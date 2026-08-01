@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
 from propline.publish import publish_slate  # noqa: E402
-from propline.rationale import add_rationales  # noqa: E402
+from propline.rationale import add_rationales, label_internal_indexes  # noqa: E402
 from propline.mlb import get_player_names  # noqa: E402
 from propline.output import build_picks_workbook  # noqa: E402
 from propline.rolling import rolling_pitcher_splits  # noqa: E402
@@ -37,6 +37,8 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--no-rationale", action="store_true", help="skip the Groq step")
     ap.add_argument("--publish", action="store_true", help="write results to Supabase")
+    ap.add_argument("--run-kind", default="manual",
+                    help="scheduled_morning | scheduled_afternoon | manual — shown on the dashboard")
     args = ap.parse_args()
     load_env()
 
@@ -116,12 +118,26 @@ def main() -> int:
                 pitcher_scores, ["player_name", "team", "opponent", "recent_k_per_game",
                                  "recent_k_pct", "recent_whiff_pct", "opp_lineup_k_pct",
                                  "recent_games"], "strikeouts", top_n=12)
+        # Team/game indexes are banded into words BEFORE the model sees them. Simply
+        # instructing it not to quote the raw values did not work — it wrote
+        # "combined offense of 0.674", which means nothing to a reader.
+        game_totals = label_internal_indexes(game_totals, {
+            "combined_offense": ("quiet", "average", "strong"),
+            "combined_bullpen_tired": ("rested", "moderately worked", "short-handed"),
+        })
         game_totals = add_rationales(
-            game_totals, ["teams", "venue", "park_runs", "combined_offense",
-                          "combined_bullpen_tired"], "game_total", top_n=8)
+            game_totals, ["teams", "venue", "park_runs", "combined_offense_desc",
+                          "combined_bullpen_tired_desc"], "game_total", top_n=8)
+
+        team_totals = label_internal_indexes(team_totals, {
+            "lineup_matchup_woba": ("unfavourable", "even", "favourable"),
+            "opp_bullpen_tired": ("rested", "moderately worked", "short-handed"),
+            "opp_starter_weak": ("tough", "average", "hittable"),
+        })
         team_totals = add_rationales(
             team_totals, ["team", "opponent", "opp_starter", "park_runs",
-                          "lineup_matchup_woba", "opp_bullpen_tired"], "team_total", top_n=8)
+                          "lineup_matchup_woba_desc", "opp_bullpen_tired_desc",
+                          "opp_starter_weak_desc"], "team_total", top_n=8)
         done = int(batter_scores.rationale.notna().sum())
         print(f"  ok    {done} batter picks explained")
     else:
@@ -154,11 +170,11 @@ def main() -> int:
                                     top_n=args.top)
             for table, n in written.items():
                 print(f"  ok    {table:16} {n} rows")
-            log_run(day, "manual", "processing", "ok",
+            log_run(day, args.run_kind, "processing", "ok",
                     detail=", ".join(f"{k}={v}" for k, v in written.items()),
                     started_at=started)
         except Exception as exc:
-            log_run(day, "manual", "processing", "failed", detail=str(exc)[:400],
+            log_run(day, args.run_kind, "processing", "failed", detail=str(exc)[:400],
                     started_at=started)
             raise
     else:
