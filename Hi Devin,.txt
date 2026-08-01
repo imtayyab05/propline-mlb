@@ -1,0 +1,27 @@
+Hi Devin,
+
+Your Project is ready.
+
+🔗 Dashboard: https://propline-mlb.netlify.app
+
+Your 20-minute morning routine is now a website you open. Every Baseball Savant file you were pulling by hand, plus schedule, lineups, bullpen availability and park factors — collected automatically five times a day, timed around when MLB actually posts confirmed lineups.
+
+Open it, pick a category, and the board is already ranked with a one-line reason for each pick. Hits, Total Bases, Home Runs, RBIs, Runs, Strikeouts, Game Totals and Team Totals. Excel export is one click.
+
+I've included a full guide for you to get started— "PropLine MLB - User Guide.docx". It covers how each category is scored, how the matchup engine weighs a hitter against the specific pitch mix he's facing, how recent form and small samples are handled, what I left out and why, and an honest list of the system's limitations. Worth ten minutes before you start using it.
+
+Two things to know up front:
+
+The Update Now button asks for a passphrase the first time on each device: 1234
+
+The scoring weights are a first version, and I'd like your input on them. They're built on the right data, but you're the one with the read on which signals matter. If you think home runs should lean harder on barrel rate, or recent form should count more against season numbers — tell me and I'll tune it. That's a quick change.
+
+Please have a proper look through it yourself. If there's anything you'd like changed, modified or added, just say — no problem at all.
+
+Genuinely, this was a fun one and one of my favourite projects to build. If you want to extend it later, or for the NFL and NBA work when those seasons come round, I'd love to pick it up. And even after the order closes, if anything comes up with this system, message me — I'll be here.
+
+If everything looks good, you can go ahead and complete the order. A review would mean a lot to me.
+
+Thanks for a great project.
+
+Tayyab

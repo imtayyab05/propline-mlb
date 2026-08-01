@@ -102,8 +102,14 @@ def label_internal_indexes(df: pd.DataFrame, mapping: dict[str, tuple[str, str, 
     return out
 
 
-RATE_LIMIT_RETRIES = 4
-PAUSE_BETWEEN_CALLS = 2.0   # free tier is 12k tokens/min; spacing avoids most 429s
+RATE_LIMIT_RETRIES = 6
+
+# Groq's free tier caps TOKENS PER MINUTE, not per request. Eight categories fired two
+# seconds apart all land inside the same minute and blow the ceiling together — which
+# is how Total Bases ended up with no rationale at all while its neighbours had 25.
+# Spreading the calls across the minute keeps each one under the limit, at the cost of
+# about a minute on a run that already takes several.
+PAUSE_BETWEEN_CALLS = 7.0
 
 # Groq reports two different 429s with the same status code: a per-MINUTE limit that
 # clears in seconds, and a per-DAY quota that clears in tens of minutes. Waiting out
