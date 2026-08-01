@@ -3,74 +3,338 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PropLine MLB</title>
+<title>PropLine MLB — Daily Prop Intelligence</title>
 <style>
   :root{
-    --bg:#0f1319; --panel:#171d26; --panel2:#1e2634; --line:#2a3444;
-    --text:#e8edf5; --muted:#93a1b5; --accent:#4ea1ff; --good:#3ecf8e;
-    --warn:#f5b942; --bad:#ff6b6b; --radius:10px;
-  }
-  @media (prefers-color-scheme: light){
-    :root{ --bg:#f4f6fa; --panel:#fff; --panel2:#eef2f8; --line:#dde3ec;
-           --text:#141a22; --muted:#5b6879; --accent:#0b69d4; }
+    --bg:#0b0e14; --bg2:#0f1420; --panel:#141a26; --panel2:#1b2230; --line:#252e3f;
+    --text:#e9eef7; --muted:#8b99ae; --dim:#5d6b80;
+    --accent:#4ea1ff; --accent2:#7c8cff;
+    --good:#3ecf8e; --warn:#f5b942; --bad:#ff6b6b; --hot:#ff7a59;
+    --radius:12px;
+    --ease:cubic-bezier(.16,1,.3,1);
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);
-       font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  header{background:var(--panel);border-bottom:1px solid var(--line);
-         padding:14px 20px;position:sticky;top:0;z-index:20}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;overflow-x:hidden;
+  }
+
+  /* ── cursor glow ─────────────────────────────────────────────────────────
+     One element that trails the pointer. Cheap: transform only, no repaint. */
+  .glow{
+    position:fixed;inset:0;pointer-events:none;z-index:0;
+    background:radial-gradient(420px circle at var(--mx,50%) var(--my,40%),
+               rgba(78,161,255,.09), transparent 65%);
+    transition:opacity .5s ease;opacity:0;
+  }
+  .glow.on{opacity:1}
+
+  /* ── hero ────────────────────────────────────────────────────────────── */
+  .hero{
+    position:relative;min-height:100svh;display:flex;flex-direction:column;
+    justify-content:center;align-items:center;text-align:center;
+    padding:80px 24px 60px;overflow:hidden;
+    background:
+      radial-gradient(900px 500px at 50% -10%, rgba(124,140,255,.13), transparent 70%),
+      radial-gradient(700px 400px at 85% 110%, rgba(255,122,89,.09), transparent 70%),
+      var(--bg);
+  }
+  /* faint graph-paper grid, masked so it fades at the edges */
+  .hero::before{
+    content:'';position:absolute;inset:0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px);
+    background-size:64px 64px;
+    -webkit-mask-image:radial-gradient(closest-side at 50% 45%, #000 55%, transparent 100%);
+            mask-image:radial-gradient(closest-side at 50% 45%, #000 55%, transparent 100%);
+  }
+  /* the vertical seam through the wordmark, like a stadium foul line */
+  .hero::after{
+    content:'';position:absolute;top:0;bottom:0;left:50%;width:1px;
+    background:linear-gradient(180deg,transparent,rgba(255,255,255,.14) 30%,
+               rgba(255,255,255,.14) 70%,transparent);
+  }
+
+  .hero-nav{
+    position:absolute;top:0;left:0;right:0;padding:22px 28px;
+    display:flex;align-items:center;gap:14px;z-index:3;
+  }
+  .mark{
+    font-size:15px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;
+    background:linear-gradient(90deg,var(--hot),var(--warn) 45%,var(--accent));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    cursor:pointer;
+  }
+  .ghost-btn{
+    margin-left:auto;padding:9px 18px;border-radius:99px;font-size:13.5px;
+    border:1px solid var(--line);background:transparent;color:var(--text);
+    cursor:pointer;transition:border-color .3s var(--ease),
+                background .3s var(--ease), transform .3s var(--ease);
+  }
+  .ghost-btn:hover{border-color:var(--accent);background:rgba(78,161,255,.08);
+                   transform:translateY(-1px)}
+
+  .hero-inner{position:relative;z-index:2;max-width:980px}
+  .eyebrow{
+    font-size:12px;letter-spacing:.28em;text-transform:uppercase;color:var(--dim);
+    margin:0 0 22px;
+  }
+  .wordmark{
+    margin:0;font-weight:900;line-height:.86;letter-spacing:-.03em;
+    font-size:clamp(58px,13vw,168px);
+    background:linear-gradient(100deg,var(--hot) 8%,var(--warn) 38%,
+               #9fd2c4 62%,var(--accent) 92%);
+    background-size:200% 100%;
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    animation:sheen 14s ease-in-out infinite;
+  }
+  @keyframes sheen{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+
+  .hero-sub{
+    margin:30px auto 0;max-width:560px;color:var(--muted);font-size:17px;
+  }
+  .cta{
+    margin-top:38px;position:relative;overflow:hidden;
+    padding:15px 34px;border-radius:99px;font-size:14px;font-weight:700;
+    letter-spacing:.1em;text-transform:uppercase;cursor:pointer;
+    color:var(--warn);background:transparent;border:1px solid rgba(245,185,66,.45);
+    transition:color .35s var(--ease),border-color .35s var(--ease),
+               transform .35s var(--ease),box-shadow .35s var(--ease);
+  }
+  .cta span{position:relative;z-index:2}
+  /* the fill sweeps in from the left on hover */
+  .cta::before{
+    content:'';position:absolute;inset:0;z-index:1;
+    background:linear-gradient(90deg,var(--warn),var(--hot));
+    transform:translateX(-101%);transition:transform .45s var(--ease);
+  }
+  .cta:hover{color:#171008;border-color:transparent;transform:translateY(-2px);
+             box-shadow:0 14px 34px rgba(245,185,66,.22)}
+  .cta:hover::before{transform:translateX(0)}
+  .cta:active{transform:translateY(0)}
+  .arrow{display:inline-block;transition:transform .35s var(--ease)}
+  .cta:hover .arrow{transform:translateX(5px)}
+
+  /* floating stat fragments — real metrics this tool actually uses */
+  .chip{
+    position:absolute;z-index:1;font-size:12.5px;font-weight:700;
+    letter-spacing:.1em;font-variant-numeric:tabular-nums;
+    color:var(--c,var(--dim));opacity:.5;white-space:nowrap;
+    animation:drift var(--d,17s) ease-in-out infinite;
+    animation-delay:var(--delay,0s);
+  }
+  @keyframes drift{
+    0%,100%{transform:translate3d(0,0,0)}
+    50%{transform:translate3d(0,-16px,0)}
+  }
+
+  .scroll-hint{
+    position:absolute;bottom:26px;left:50%;transform:translateX(-50%);
+    color:var(--dim);font-size:20px;z-index:2;
+    animation:bob 2.4s ease-in-out infinite;
+  }
+  @keyframes bob{0%,100%{transform:translate(-50%,0);opacity:.45}
+                 50%{transform:translate(-50%,9px);opacity:.9}}
+
+  /* ── how it works ────────────────────────────────────────────────────── */
+  .how{padding:110px 24px 120px;background:var(--bg2);position:relative;z-index:1}
+  .how-head{text-align:center;max-width:760px;margin:0 auto 58px}
+  .how-head .eyebrow{margin-bottom:16px}
+  .how-head h2{margin:0;font-size:clamp(26px,4.2vw,42px);letter-spacing:-.02em;
+               font-weight:800}
+  .cards{display:grid;gap:20px;max-width:1120px;margin:0 auto;
+         grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+  .card{
+    position:relative;padding:30px 26px 28px;border-radius:var(--radius);
+    background:linear-gradient(180deg,var(--panel),rgba(20,26,38,.6));
+    border:1px solid var(--line);overflow:hidden;
+    transition:transform .45s var(--ease),border-color .45s var(--ease),
+               box-shadow .45s var(--ease);
+  }
+  .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+                background:var(--c);opacity:.85}
+  .card:hover{transform:translateY(-6px);border-color:color-mix(in srgb,var(--c) 45%,var(--line));
+              box-shadow:0 18px 44px rgba(0,0,0,.42)}
+  .card .n{font-size:13px;font-weight:800;color:var(--c);letter-spacing:.12em}
+  .card h3{margin:12px 0 10px;font-size:20px;letter-spacing:-.01em}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+
+  /* ── scroll reveal ───────────────────────────────────────────────────────
+     Hiding is gated behind .js-reveal, which the script adds to <html> only
+     once it has an observer ready. If the script fails, never loads, or the
+     browser lacks IntersectionObserver, the copy is simply visible — the one
+     unacceptable outcome here is a permanently blank section. */
+  .js-reveal .reveal{opacity:0;transform:translateY(26px);
+          transition:opacity .8s var(--ease),transform .8s var(--ease)}
+  .js-reveal .reveal.in{opacity:1;transform:none}
+  .reveal[data-d="1"]{transition-delay:.09s}
+  .reveal[data-d="2"]{transition-delay:.18s}
+  .reveal[data-d="3"]{transition-delay:.27s}
+
+  /* ── dashboard ───────────────────────────────────────────────────────── */
+  #app{position:relative;z-index:1;background:var(--bg);scroll-margin-top:0}
+  header{
+    background:rgba(20,26,38,.82);backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line);padding:14px 20px;
+    position:sticky;top:0;z-index:20;transition:padding .35s var(--ease);
+  }
+  header.tight{padding:9px 20px}
   .row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-  .brand{font-size:19px;font-weight:700;letter-spacing:-.2px}
-  .brand span{color:var(--accent)}
+  .brand{font-size:19px;font-weight:800;letter-spacing:-.2px;cursor:pointer}
+  .brand span{
+    background:linear-gradient(90deg,var(--accent),var(--accent2));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
   .spacer{flex:1}
   .meta{font-size:13px;color:var(--muted)}
   .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11.5px;
-         font-weight:600;text-transform:uppercase;letter-spacing:.4px}
-  .b-conf{background:rgba(62,207,142,.16);color:var(--good)}
-  .b-proj{background:rgba(245,185,66,.16);color:var(--warn)}
-  .b-err{background:rgba(255,107,107,.16);color:var(--bad)}
+         font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .b-conf{background:rgba(62,207,142,.15);color:var(--good)}
+  .b-proj{background:rgba(245,185,66,.15);color:var(--warn)}
+  .b-err{background:rgba(255,107,107,.15);color:var(--bad)}
+
   button,select,input{font:inherit;color:var(--text);background:var(--panel2);
-        border:1px solid var(--line);border-radius:8px;padding:7px 11px}
+        border:1px solid var(--line);border-radius:9px;padding:8px 12px;
+        transition:border-color .3s var(--ease),background .3s var(--ease),
+                   transform .2s var(--ease),box-shadow .3s var(--ease)}
   button{cursor:pointer}
-  button:hover:not(:disabled){border-color:var(--accent)}
-  button:disabled{opacity:.55;cursor:not-allowed}
-  .primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-  main{padding:18px 20px;max-width:1500px;margin:0 auto}
-  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
-  .tab{padding:7px 14px;border-radius:8px;background:var(--panel);
-       border:1px solid var(--line);cursor:pointer;font-size:14px}
-  .tab.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-  .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  button:hover:not(:disabled){border-color:var(--accent);transform:translateY(-1px);
+                              box-shadow:0 6px 18px rgba(0,0,0,.3)}
+  button:active:not(:disabled){transform:translateY(0)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input:focus,select:focus{outline:none;border-color:var(--accent);
+                           box-shadow:0 0 0 3px rgba(78,161,255,.14)}
+  .primary{background:linear-gradient(135deg,var(--accent),var(--accent2));
+           border-color:transparent;color:#fff;font-weight:700}
+  .primary:hover:not(:disabled){box-shadow:0 8px 24px rgba(78,161,255,.32)}
+
+  main{padding:20px;max-width:1500px;margin:0 auto}
+  .tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:16px}
+  .tab{
+    padding:8px 15px;border-radius:9px;background:var(--panel);
+    border:1px solid var(--line);cursor:pointer;font-size:14px;position:relative;
+    transition:background .3s var(--ease),border-color .3s var(--ease),
+               color .3s var(--ease),transform .25s var(--ease);
+  }
+  .tab:hover{transform:translateY(-2px);border-color:var(--accent)}
+  .tab.on{background:linear-gradient(135deg,var(--accent),var(--accent2));
+          border-color:transparent;color:#fff;font-weight:700}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
   .wrap{background:var(--panel);border:1px solid var(--line);
         border-radius:var(--radius);overflow-x:auto}
   table{width:100%;border-collapse:collapse;font-size:14px;min-width:760px}
-  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);
+  th,td{padding:10px 13px;text-align:left;border-bottom:1px solid var(--line);
         white-space:nowrap}
-  th{background:var(--panel2);font-size:12px;text-transform:uppercase;
-     letter-spacing:.5px;color:var(--muted);font-weight:600;
-     position:sticky;top:0}
+  th{background:var(--panel2);font-size:11.5px;text-transform:uppercase;
+     letter-spacing:.5px;color:var(--muted);font-weight:700;position:sticky;top:0}
+  tbody tr{transition:background .22s var(--ease)}
   tbody tr:hover{background:var(--panel2)}
+  /* the left edge lights up on hover — cheap way to make rows feel touchable */
+  tbody tr td:first-child{box-shadow:inset 2px 0 0 transparent;
+                          transition:box-shadow .25s var(--ease)}
+  tbody tr:hover td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
   tbody tr:last-child td{border-bottom:none}
-  .rank{color:var(--muted);font-variant-numeric:tabular-nums;width:44px}
-  .name{font-weight:600}
-  .score{font-weight:700;font-variant-numeric:tabular-nums}
-  .why{white-space:normal;color:var(--muted);min-width:290px;max-width:460px;
+
+  /* rows fade in staggered whenever the board re-renders */
+  @keyframes rowIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+  tbody tr{animation:rowIn .42s var(--ease) both;animation-delay:calc(var(--i,0)*22ms)}
+
+  .rank{color:var(--dim);font-variant-numeric:tabular-nums;width:46px}
+  .name{font-weight:650}
+  .score{font-weight:800;font-variant-numeric:tabular-nums}
+  .s-hi{color:var(--good)} .s-mid{color:var(--warn)} .s-lo{color:var(--muted)}
+  .why{white-space:normal;color:var(--muted);min-width:290px;max-width:470px;
        font-size:13.5px}
   .num{font-variant-numeric:tabular-nums;color:var(--muted)}
-  .empty{padding:40px;text-align:center;color:var(--muted)}
-  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
-         background:var(--panel);border:1px solid var(--line);padding:11px 18px;
-         border-radius:9px;box-shadow:0 8px 28px rgba(0,0,0,.35);z-index:50;
-         max-width:90vw}
+  .empty{padding:48px;text-align:center;color:var(--muted)}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translate(-50%,14px);
+         background:var(--panel);border:1px solid var(--line);padding:12px 19px;
+         border-radius:10px;box-shadow:0 12px 36px rgba(0,0,0,.5);z-index:60;
+         max-width:90vw;opacity:0;pointer-events:none;
+         transition:opacity .35s var(--ease),transform .35s var(--ease)}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
   .hidden{display:none}
   .thin{color:var(--warn)}
+
+  footer{padding:34px 24px;border-top:1px solid var(--line);color:var(--dim);
+         font-size:13px;display:flex;gap:14px;flex-wrap:wrap;
+         max-width:1500px;margin:0 auto}
+
+  /* Anyone who has asked their OS to calm animations down gets a static site.
+     Everything still works; it just stops moving. */
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation:none!important;transition:none!important}
+    html{scroll-behavior:auto}
+    .reveal{opacity:1;transform:none}
+  }
 </style>
 </head>
 <body>
 
-<header>
+<div class="glow" id="glow"></div>
+
+<!-- ── hero ──────────────────────────────────────────────────────────── -->
+<section class="hero" id="hero">
+  <nav class="hero-nav">
+    <div class="mark" data-top>PropLine MLB</div>
+    <button class="ghost-btn" data-enter>Open Dashboard</button>
+  </nav>
+
+  <div id="chips"></div>
+
+  <div class="hero-inner">
+    <p class="eyebrow">MLB Prop Betting · Daily Automation</p>
+    <h1 class="wordmark">PROP<br>LINE</h1>
+    <p class="hero-sub">
+      Every hitter measured against the pitch mix he actually faces today.
+      Ranked before first pitch, not after.
+    </p>
+    <button class="cta" data-enter>
+      <span>Open Dashboard <i class="arrow">→</i></span>
+    </button>
+  </div>
+
+  <div class="scroll-hint">↓</div>
+</section>
+
+<!-- ── how it works ──────────────────────────────────────────────────── -->
+<section class="how" id="how">
+  <div class="how-head reveal">
+    <p class="eyebrow">How it works</p>
+    <h2>From twenty minutes of downloads to one ranked board</h2>
+  </div>
+  <div class="cards">
+    <div class="card reveal" data-d="1" style="--c:#ff6b6b">
+      <div class="n">01</div>
+      <h3>Pull the whole slate</h3>
+      <p>Every Baseball Savant leaderboard, last-5 and last-10 splits by pitcher
+         hand, confirmed lineups, bullpen availability and park factors —
+         collected automatically, five times a day.</p>
+    </div>
+    <div class="card reveal" data-d="2" style="--c:#f5b942">
+      <div class="n">02</div>
+      <h3>Match bat against arsenal</h3>
+      <p>A pitcher throws a specific mix. A hitter has a record against each pitch
+         type. Weighting one by the other shows how he fares against
+         <em>this</em> starter, not against pitching in general.</p>
+    </div>
+    <div class="card reveal" data-d="3" style="--c:#4ea1ff">
+      <div class="n">03</div>
+      <h3>Rank, then explain</h3>
+      <p>Hits, total bases, home runs, RBIs, runs, strikeouts and game totals —
+         scored on the numbers, each with a one-line reason you can check.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── dashboard ─────────────────────────────────────────────────────── -->
+<div id="app">
+<header id="hdr">
   <div class="row">
-    <div class="brand">Prop<span>Line</span> MLB</div>
+    <div class="brand" data-top>Prop<span>Line</span> MLB</div>
     <select id="slate" title="Slate date"></select>
     <div class="spacer"></div>
     <div class="meta" id="freshness">loading…</div>
@@ -107,7 +371,14 @@
   </div>
 </main>
 
-<div class="toast hidden" id="toast"></div>
+<footer>
+  <div>PropLine MLB</div>
+  <div class="spacer"></div>
+  <div>Stats from Baseball Savant &amp; the MLB Stats API · rankings are a model, not advice</div>
+</footer>
+</div>
+
+<div class="toast" id="toast"></div>
 
 <!-- Local development only; absent when hosted, where /api/config supplies the values.
      onerror keeps the console clean when the file legitimately does not exist. -->
@@ -132,9 +403,97 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function toast(msg, ms=4200){
-  const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
-  clearTimeout(toast._t); toast._t = setTimeout(()=>t.classList.add('hidden'), ms);
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(()=>t.classList.remove('show'), ms);
 }
+
+/* ── presentation ──────────────────────────────────────────────────────
+   Everything below is decoration. None of it touches the data path, so a
+   failure here can never cost the client a pick. */
+
+// Real metrics from this tool, scattered around the hero. Positions are fixed
+// rather than random so nothing ever lands on top of the wordmark.
+const CHIPS = [
+  ['xwOBA .462', 8,  16, '#ff6b6b'], ['BARREL% 15.0', 84, 22, '#4ea1ff'],
+  ['L10 FORM',    5,  40, '#f5b942'], ['HARD-HIT 44%', 88, 46, '#3ecf8e'],
+  ['K/9 11.3',    11, 66, '#7c8cff'], ['PARK 128',     86, 68, '#ff7a59'],
+  ['WHIFF% 37',   16, 84, '#3ecf8e'], ['CONFIRMED',    80, 86, '#f5b942'],
+];
+function paintChips(){
+  $('#chips').innerHTML = CHIPS.map(([t,x,y,c],i)=>
+    `<div class="chip" style="left:${x}%;top:${y}%;--c:${c};
+      --d:${14+i*1.6}s;--delay:${i*.45}s">${t}</div>`).join('');
+}
+
+// Pointer glow. Written straight to a CSS variable and rAF-throttled, so it
+// costs one composite per frame at most.
+function initGlow(){
+  const g = $('#glow'); let queued = false, x = 0, y = 0;
+  addEventListener('pointermove', e => {
+    x = e.clientX; y = e.clientY;
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(()=>{
+      g.style.setProperty('--mx', x+'px');
+      g.style.setProperty('--my', y+'px');
+      g.classList.add('on'); queued = false;
+    });
+  }, {passive:true});
+}
+
+function initReveal(){
+  const els = [...document.querySelectorAll('.reveal')];
+  if (!els.length) return;
+
+  // No observer support, or motion turned down at the OS level: show everything
+  // now and skip the animation entirely.
+  if (!('IntersectionObserver' in window) ||
+      matchMedia('(prefers-reduced-motion: reduce)').matches){
+    els.forEach(el=>el.classList.add('in'));
+    return;
+  }
+
+  document.documentElement.classList.add('js-reveal');
+  const io = new IntersectionObserver(entries=>{
+    entries.forEach(en=>{ if(en.isIntersecting){ en.target.classList.add('in');
+                                                 io.unobserve(en.target); } });
+  }, {threshold:.16, rootMargin:'0px 0px -8% 0px'});
+  els.forEach(el=>io.observe(el));
+
+  // Failsafe. A backgrounded tab produces no frames, so observer callbacks never
+  // arrive; the same is true of a few older mobile browsers. Rather than leave the
+  // section blank forever, reveal anything still hidden after three seconds.
+  setTimeout(()=>els.forEach(el=>el.classList.add('in')), 3000);
+}
+
+function initHeader(){
+  const hdr = $('#hdr');
+  addEventListener('scroll', ()=>{
+    hdr.classList.toggle('tight', hdr.getBoundingClientRect().top <= 0
+                                  && scrollY > innerHeight);
+  }, {passive:true});
+}
+
+// Devin opens this every morning; making him scroll past a hero each time would
+// get old fast. So the hero is shown once, then remembered — the wordmark in
+// either bar always takes him back to it.
+function initNav(){
+  document.querySelectorAll('[data-enter]').forEach(b=>
+    b.addEventListener('click', ()=>{
+      localStorage.setItem('propline_seen', '1');
+      $('#app').scrollIntoView({behavior:'smooth'});
+    }));
+  document.querySelectorAll('[data-top]').forEach(b=>
+    b.addEventListener('click', ()=>
+      scrollTo({top:0, behavior:'smooth'})));
+
+  if (localStorage.getItem('propline_seen')){
+    // jump, do not animate — an unrequested scroll on load is disorienting
+    requestAnimationFrame(()=>$('#app').scrollIntoView({behavior:'auto'}));
+  }
+}
+
+/* ── data ──────────────────────────────────────────────────────────────── */
 
 async function loadConfig(){
   // Hosted: /api/config serves the public values from environment variables, so the
@@ -186,9 +545,6 @@ async function loadFreshness(){
     `updated <strong>${ago}</strong> · ${esc(last.run_type)}` +
     (failed ? ' <span class="badge b-err">last run failed</span>' : '');
 
-  // lineup confirmation state for this slate
-  const lu = await sb('lineups', {select:'status', slate_date:`eq.${slateDate}`,
-                                  limit:1}).catch(()=>[]);
   const counts = await sb('lineups',
     {select:'status', game_date:`eq.${slateDate}`}).catch(()=>[]);
   const conf = counts.filter(r=>r.status==='confirmed').length;
@@ -233,6 +589,9 @@ function filtered(){
   });
 }
 
+// Scores are already percentile-based, so these bands are just a reading aid.
+const scoreClass = s => s >= 80 ? 's-hi' : s >= 60 ? 's-mid' : 's-lo';
+
 function render(){
   const prop = PROPS.find(p=>p.key===current);
   const data = filtered();
@@ -245,16 +604,18 @@ function render(){
     : `<tr><th>#</th><th>Matchup</th><th>Venue</th><th>Score</th>
        <th>Park Runs</th><th>Why</th></tr>`;
 
-  $('#tbody').innerHTML = data.map(r=>{
+  $('#tbody').innerHTML = data.map((r,i)=>{
     const d = r.details || {};
+    // cap the stagger so a 200-row board still finishes animating promptly
+    const st = `style="--i:${Math.min(i,26)}"`;
     if (!isPlayer){
       const pf = r.park_runs ?? '—';
       const flag = r.park_matched === false ? ' <span class="thin">(no park data)</span>' : '';
-      return `<tr>
+      return `<tr ${st}>
         <td class="rank">${r.rank}</td>
         <td class="name">${esc(r.subject)}</td>
         <td class="num">${esc(r.venue||'')}</td>
-        <td class="score">${r.score}</td>
+        <td class="score ${scoreClass(r.score)}">${r.score}</td>
         <td class="num">${pf}${flag}</td>
         <td class="why">${esc(r.rationale||'')}</td></tr>`;
     }
@@ -264,12 +625,12 @@ function render(){
       ? '<span class="badge b-conf">confirmed</span>'
       : r.lineup_status === 'projected'
         ? '<span class="badge b-proj">projected</span>' : '';
-    return `<tr>
+    return `<tr ${st}>
       <td class="rank">${r.rank}</td>
       <td class="name">${esc(r.subject_name)}</td>
       <td class="num">${esc(r.team||'')}</td>
       <td class="num">${esc(r.opponent||'')}</td>
-      <td class="score">${r.score}</td>
+      <td class="score ${scoreClass(r.score)}">${r.score}</td>
       <td>${badge}</td>
       <td class="num ${thin?'thin':''}">${games!=null?`${games} G`:'—'}</td>
       <td class="why">${esc(r.rationale||'')}</td></tr>`;
@@ -363,10 +724,12 @@ async function refresh(){
 }
 
 async function init(){
+  paintChips(); initGlow(); initReveal(); initHeader(); initNav();
+
   try{
     CFG = await loadConfig();
   }catch(e){
-    document.body.innerHTML =
+    $('#app').innerHTML =
       `<div class="empty" style="padding:60px">${esc(e.message)}</div>`;
     return;
   }
