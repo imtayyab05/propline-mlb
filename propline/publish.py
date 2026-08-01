@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .db import delete_where, upsert
+from .db import delete_where, read, upsert
 
 # signals stored alongside each pick so the dashboard can show the "why" without
 # recomputing anything
@@ -50,9 +50,18 @@ def _details(df: pd.DataFrame, cols: list[str]) -> pd.Series:
 
 def publish_slate(slate_date, schedule, lineups, bullpen,
                   batter_scores, pitcher_scores, team_totals, game_totals,
-                  top_n: int = 40) -> dict[str, int]:
-    """Write the whole slate. Returns rows written per table."""
+                  top_n: int | None = None) -> dict[str, int]:
+    """Write the whole slate. Returns rows written per table.
+
+    top_n=None publishes every scored row. The dashboard can only filter what it has
+    been given, so truncating here silently breaks its filters: with three teams
+    confirmed, only three of those 27 hitters fell inside a top-40 cut, making
+    "Confirmed only" look empty rather than selective. The Excel workbook is trimmed
+    separately, where a shorter tab genuinely does read better.
+    """
     written: dict[str, int] = {}
+    # a plain slice is clearer than threading None through every .head() call
+    cut = (lambda df: df) if top_n is None else (lambda df: df.head(top_n))
 
     if schedule is not None and not schedule.empty:
         cols = ["game_pk", "game_date", "game_time_utc", "status", "venue",
@@ -64,9 +73,32 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
     if lineups is not None and not lineups.empty:
         cols = ["game_pk", "game_date", "team_id", "team", "opponent_id", "home_away",
                 "batting_order", "player_id", "player_name", "position", "status"]
-        delete_where("lineups", {"game_date": f"eq.{slate_date}"})
-        written["lineups"] = upsert("lineups", _ints(lineups[[c for c in cols if c in lineups]]),
-                                    on_conflict="game_pk,team_id,batting_order")
+        incoming = _ints(lineups[[c for c in cols if c in lineups]])
+
+        # A confirmed lineup must never be replaced by a projection. The collection
+        # step already respects that, but the guarantee has to hold at this layer too:
+        # re-running processing against an earlier intermediate workbook would
+        # otherwise quietly downgrade teams that have since been confirmed, putting
+        # "projected" badges on picks that are actually settled — the single most
+        # misleading thing this tool could show.
+        existing = read("lineups", {"select": "team_id,status",
+                                    "game_date": f"eq.{slate_date}", "limit": "2000"})
+        locked = {r["team_id"] for r in existing if r["status"] == "confirmed"}
+        if locked:
+            downgrade = incoming["team_id"].isin(locked) & (incoming["status"] != "confirmed")
+            if downgrade.any():
+                teams = incoming.loc[downgrade, "team"].nunique()
+                print(f"  keep  {teams} confirmed lineup(s) — refusing to overwrite "
+                      f"with projections")
+                incoming = incoming[~downgrade]
+
+        if not incoming.empty:
+            # Clear only the teams being rewritten, so the protected ones survive.
+            for tid in incoming["team_id"].dropna().unique():
+                delete_where("lineups", {"game_date": f"eq.{slate_date}",
+                                         "team_id": f"eq.{int(tid)}"})
+            written["lineups"] = upsert("lineups", incoming,
+                                        on_conflict="game_pk,team_id,batting_order")
 
     if bullpen is not None and not bullpen.empty:
         bp = bullpen.rename(columns={"as_of": "as_of"}).copy()
@@ -81,7 +113,7 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
     picks = []
     if batter_scores is not None and not batter_scores.empty:
         for prop, grp in batter_scores.groupby("prop"):
-            g = grp.sort_values("score", ascending=False).head(top_n).copy()
+            g = cut(grp.sort_values("score", ascending=False)).copy()
             picks.append(pd.DataFrame({
                 "slate_date": str(slate_date), "prop": prop,
                 "subject_id": g["player_id"], "subject_name": g["player_name"],
@@ -93,7 +125,7 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
             }))
 
     if pitcher_scores is not None and not pitcher_scores.empty:
-        g = pitcher_scores.sort_values("score", ascending=False).head(top_n).copy()
+        g = cut(pitcher_scores.sort_values("score", ascending=False)).copy()
         picks.append(pd.DataFrame({
             "slate_date": str(slate_date), "prop": "strikeouts",
             "subject_id": g["player_id"], "subject_name": g["player_name"],

@@ -260,6 +260,7 @@
        font-size:13.5px}
   .num{font-variant-numeric:tabular-nums;color:var(--muted)}
   .empty{padding:48px;text-align:center;color:var(--muted)}
+  .more-row{display:flex;align-items:center;gap:14px;margin-top:14px}
   .toast{position:fixed;bottom:22px;left:50%;transform:translate(-50%,14px);
          background:var(--panel);border:1px solid var(--line);padding:12px 19px;
          border-radius:10px;box-shadow:0 12px 36px rgba(0,0,0,.5);z-index:60;
@@ -401,6 +402,11 @@
       <tbody id="tbody"></tbody>
     </table>
     <div class="empty hidden" id="empty">Nothing to show for this slate yet.</div>
+  </div>
+
+  <div class="more-row">
+    <button id="more" class="hidden"></button>
+    <span class="meta" id="count"></span>
   </div>
 </main>
 
@@ -727,9 +733,16 @@ function filtered(){
 // Scores are already percentile-based, so these bands are just a reading aid.
 const scoreClass = s => s >= 80 ? 's-hi' : s >= 60 ? 's-mid' : 's-lo';
 
+// The database now holds every scored player, not just the top 40, so that the
+// filters actually work — but nobody wants to scroll 270 rows to reach the controls.
+// Show a useful chunk, with an explicit way to see the rest.
+const PAGE_ROWS = 60;
+let showAll = false;
+
 function render(){
   const prop = PROPS.find(p=>p.key===current);
-  const data = filtered();
+  const all = filtered();
+  const data = showAll ? all : all.slice(0, PAGE_ROWS);
   const isPlayer = prop.kind === 'player';
 
   $('#thead').innerHTML = isPlayer
@@ -772,6 +785,13 @@ function render(){
   }).join('');
 
   $('#empty').classList.toggle('hidden', data.length > 0);
+
+  const more = $('#more');
+  const hidden = all.length - data.length;
+  more.classList.toggle('hidden', hidden <= 0);
+  if (hidden > 0) more.textContent = `Show all ${all.length} — ${hidden} more below`;
+  $('#count').textContent = all.length
+    ? `${data.length} of ${all.length}` : '';
 }
 
 // The workbook is uploaded to storage by each publishing run, under a predictable
@@ -878,12 +898,14 @@ async function init(){
   $('#tabs').addEventListener('click', e=>{
     const t = e.target.closest('.tab'); if(!t) return;
     current = t.dataset.k;
+    showAll = false;
     document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on', x===t));
     loadProp().catch(err=>toast(err.message));
   });
 
   ['search','teamfilter','statusfilter'].forEach(id=>
-    $('#'+id).addEventListener('input', render));
+    $('#'+id).addEventListener('input', ()=>{ showAll = false; render(); }));
+  $('#more').addEventListener('click', ()=>{ showAll = true; render(); });
   $('#slate').addEventListener('change', e=>{ slateDate = e.target.value; refresh(); });
   $('#refresh').addEventListener('click', refresh);
   $('#update').addEventListener('click', updateNow);

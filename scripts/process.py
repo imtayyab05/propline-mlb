@@ -35,7 +35,16 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="PropLine MLB — processing")
     ap.add_argument("--date", default=date.today().isoformat())
     ap.add_argument("--window", default="L10", choices=["L5", "L10"])
-    ap.add_argument("--top", type=int, default=40)
+    ap.add_argument("--top", type=int, default=40,
+                    help="rows per tab in the Excel workbook, where a long tab is just "
+                         "harder to read")
+    ap.add_argument("--publish-top", type=int, default=0,
+                    help="rows per category written to the database; 0 means all. The "
+                         "dashboard filters what it is given, so publishing only the top "
+                         "40 made 'Confirmed only' near-useless mid-afternoon — with 3 "
+                         "teams confirmed, just 3 of those 27 hitters ranked inside the "
+                         "top 40. Searching a player outside the top 40 came back empty "
+                         "for the same reason.")
     ap.add_argument("--no-rationale", action="store_true", help="skip the Groq step")
     ap.add_argument("--explain-top", type=int, default=25,
                     help="how many picks per category get a written reason. The "
@@ -172,7 +181,7 @@ def main() -> int:
         try:
             written = publish_slate(day, schedule, lineups, bullpen, batter_scores,
                                     pitcher_scores, team_totals, game_totals,
-                                    top_n=args.top)
+                                    top_n=args.publish_top or None)
             for table, n in written.items():
                 print(f"  ok    {table:16} {n} rows")
 
