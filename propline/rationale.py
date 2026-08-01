@@ -19,7 +19,13 @@ import pandas as pd
 import requests
 
 ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-MODEL = "llama-3.3-70b-versatile"
+# A small model on purpose. This job is "restate two supplied numbers in a sentence",
+# not reasoning — and the 70B's free daily token quota ran out partway through a single
+# day of five scheduled runs, with Groq then asking us to wait 47 minutes. The 8B has a
+# far larger allowance, is quicker, and in side-by-side testing was actually MORE
+# accurate here: it wrote "barrelling 6.2% of batted balls" where a bigger model wrote
+# "6.2% of his swings", which is a different statistic.
+MODEL = "llama-3.1-8b-instant"
 TIMEOUT = 120
 MAX_PER_CALL = 25          # keep each prompt small enough to stay reliable
 
@@ -99,6 +105,13 @@ def label_internal_indexes(df: pd.DataFrame, mapping: dict[str, tuple[str, str, 
 RATE_LIMIT_RETRIES = 4
 PAUSE_BETWEEN_CALLS = 2.0   # free tier is 12k tokens/min; spacing avoids most 429s
 
+# Groq reports two different 429s with the same status code: a per-MINUTE limit that
+# clears in seconds, and a per-DAY quota that clears in tens of minutes. Waiting out
+# the daily one would stall a scheduled run past its 45-minute timeout, five times a
+# day — so anything longer than this is treated as "no rationale today" instead.
+# Picks are still fully ranked and usable; only the written sentence is missing.
+MAX_WAIT_SECONDS = 90
+
 
 def _retry_after(resp) -> float:
     """How long Groq wants us to wait. It says so in the header and the message."""
@@ -125,11 +138,17 @@ def _call(rows: list[dict], api_key: str) -> dict[int, str]:
     for attempt in range(1, RATE_LIMIT_RETRIES + 1):
         r = requests.post(ENDPOINT, headers={"Authorization": f"Bearer {api_key}"},
                           json=body, timeout=TIMEOUT)
-        if r.status_code == 429 and attempt < RATE_LIMIT_RETRIES:
+        if r.status_code == 429:
             wait = _retry_after(r) + 0.5
-            print(f"    rate limited, waiting {wait:.1f}s")
-            time.sleep(wait)
-            continue
+            if wait > MAX_WAIT_SECONDS:
+                raise RuntimeError(
+                    f"daily quota reached (Groq asked for {wait / 60:.0f} min) — "
+                    f"skipping rationale text for this run"
+                )
+            if attempt < RATE_LIMIT_RETRIES:
+                print(f"    rate limited, waiting {wait:.1f}s")
+                time.sleep(wait)
+                continue
         if not r.ok:
             raise RuntimeError(f"groq {r.status_code}: {r.text[:300]}")
         content = r.json()["choices"][0]["message"]["content"]

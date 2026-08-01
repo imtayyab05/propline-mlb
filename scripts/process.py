@@ -37,6 +37,10 @@ def main() -> int:
     ap.add_argument("--window", default="L10", choices=["L5", "L10"])
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--no-rationale", action="store_true", help="skip the Groq step")
+    ap.add_argument("--explain-top", type=int, default=25,
+                    help="how many picks per category get a written reason. The "
+                         "dashboard lists 40, so anything lower leaves visible blanks "
+                         "in the Why column.")
     ap.add_argument("--publish", action="store_true", help="write results to Supabase")
     ap.add_argument("--run-kind", default="manual",
                     help="scheduled_morning | scheduled_afternoon | manual — shown on the dashboard")
@@ -112,13 +116,13 @@ def main() -> int:
                    "best_pitch_for_batter", "primary_pitch", "recent_games"]
         parts = []
         for prop, grp in batter_scores.groupby("prop"):
-            parts.append(add_rationales(grp, bfields, prop, top_n=12))
+            parts.append(add_rationales(grp, bfields, prop, top_n=args.explain_top))
         batter_scores = pd.concat(parts, ignore_index=True)
         if not pitcher_scores.empty:
             pitcher_scores = add_rationales(
                 pitcher_scores, ["player_name", "team", "opponent", "recent_k_per_game",
                                  "recent_k_pct", "recent_whiff_pct", "opp_lineup_k_pct",
-                                 "recent_games"], "strikeouts", top_n=12)
+                                 "recent_games"], "strikeouts", top_n=args.explain_top)
         # Team/game indexes are banded into words BEFORE the model sees them. Simply
         # instructing it not to quote the raw values did not work — it wrote
         # "combined offense of 0.674", which means nothing to a reader.
@@ -128,7 +132,7 @@ def main() -> int:
         })
         game_totals = add_rationales(
             game_totals, ["teams", "venue", "park_runs", "combined_offense_desc",
-                          "combined_bullpen_tired_desc"], "game_total", top_n=8)
+                          "combined_bullpen_tired_desc"], "game_total", top_n=args.explain_top)
 
         team_totals = label_internal_indexes(team_totals, {
             "lineup_matchup_woba": ("unfavourable", "even", "favourable"),
@@ -138,7 +142,7 @@ def main() -> int:
         team_totals = add_rationales(
             team_totals, ["team", "opponent", "opp_starter", "park_runs",
                           "lineup_matchup_woba_desc", "opp_bullpen_tired_desc",
-                          "opp_starter_weak_desc"], "team_total", top_n=8)
+                          "opp_starter_weak_desc"], "team_total", top_n=args.explain_top)
         done = int(batter_scores.rationale.notna().sum())
         print(f"  ok    {done} batter picks explained")
     else:
