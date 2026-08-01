@@ -40,6 +40,11 @@ def main() -> int:
                     help="days of raw pitch data to pull for rolling splits")
     ap.add_argument("--skip-raw", action="store_true")
     ap.add_argument("--run-kind", default="manual")
+    ap.add_argument("--reuse-raw", action="store_true",
+                    help="reuse today's already-downloaded Savant files and only refresh "
+                         "lineups/bullpen. Season stats do not change during the day, so "
+                         "the later runs of a slate need not re-pull them. Falls back to "
+                         "a full pull automatically if the files are not there.")
     args = ap.parse_args()
     load_env()
 
@@ -52,21 +57,41 @@ def main() -> int:
 
     print(f"\n{'='*66}\nPropLine collection — {day}\n{'='*66}")
 
-    # 1. Savant season leaderboards
-    print("\n[1/5] Savant leaderboards (season)")
-    manifest = pull_leaderboards(year, raw_dir)
+    # Can we skip the expensive half? Only if the earlier run of this same slate
+    # actually left its files behind — otherwise silently fall back to a full pull
+    # rather than producing a half-empty workbook.
+    existing_raw = sorted(raw_dir.glob("statcast_raw_*.csv"))
+    reuse = bool(args.reuse_raw and existing_raw
+                 and (raw_dir / "batter_pitch_arsenal_stats.csv").exists())
+    if args.reuse_raw and not reuse:
+        print("\n  NOTE  --reuse-raw asked for, but today's files are not present; "
+              "doing a full pull instead")
 
-    # 2. Windowed + handedness splits (bat-tracking family only)
-    print("\n[2/5] Windowed splits")
-    for days in args.windows:
-        start = (as_of - timedelta(days=days)).isoformat()
-        for hand in args.hands:
-            print(f"  -- last {days}d vs {hand}HP")
-            pull_leaderboards(year, raw_dir, date_start=start, date_end=day, hand=hand)
+    if reuse:
+        print("\n[1/5] Savant leaderboards — REUSING today's earlier download")
+        print("[2/5] Windowed splits — reused")
+        manifest = pd.DataFrame([{"pull": "reused", "rows": 0, "ok": True}])
+    else:
+        # 1. Savant season leaderboards
+        print("\n[1/5] Savant leaderboards (season)")
+        manifest = pull_leaderboards(year, raw_dir)
+
+        # 2. Windowed + handedness splits (bat-tracking family only)
+        print("\n[2/5] Windowed splits")
+        for days in args.windows:
+            start = (as_of - timedelta(days=days)).isoformat()
+            for hand in args.hands:
+                print(f"  -- last {days}d vs {hand}HP")
+                pull_leaderboards(year, raw_dir, date_start=start, date_end=day, hand=hand)
 
     # 3. Raw pitch-level data -> rolling L5/L10
     rolling = pd.DataFrame()
-    if not args.skip_raw:
+    if reuse:
+        print(f"\n[3/5] Rolling splits — recomputed from the cached pitch data")
+        raw = pd.read_csv(existing_raw[-1], low_memory=False)
+        rolling = rolling_batter_splits(raw, windows=tuple(args.windows))
+        print(f"  ok    rolling splits: {len(rolling)} rows")
+    elif not args.skip_raw:
         print(f"\n[3/5] Raw pitch data (last {args.raw_days}d) + rolling splits")
         start = (as_of - timedelta(days=args.raw_days)).isoformat()
         raw = pull_statcast_search(start, day, year, raw_dir)

@@ -72,7 +72,28 @@ has no CSV export. Savant covers 29 venues; temporary parks (e.g. the Athletics'
 Health Park) have none and fall back to neutral 100, flagged by `park_matched` so the
 default is visible rather than silent.
 
-**Phase 3 (frontend)** — not started.
+**Phase 3 (frontend + automation) — built, awaiting deploy.**
+
+- `web/index.html` — single static page, no build step. Reads Supabase directly with
+  the publishable key. Verified locally against live data.
+- `api/config.js` / `api/trigger.js` — Vercel functions. config serves only public
+  values; trigger holds the GitHub token server-side and is passphrase-gated
+  (`UPDATE_SECRET`), since an open trigger URL would burn the client's Actions minutes.
+- `.github/workflows/daily.yml` — five runs a day.
+
+**Confirmed lineups are proven.** On 2026-07-31 a late run returned
+`{'confirmed': 270}` — the full projected→confirmed path works against live MLB data,
+not just structurally.
+
+**Actions minutes matter.** A private repo gets 2,000 free minutes/month. A full run is
+~10 min, so five full runs a day would exceed it. Only the 13:00 UTC run downloads from
+Savant; the rest restore `data/raw/<date>` from actions/cache and pass `--reuse-raw`,
+which takes ~2 min. Season stats do not change during a day — only lineups do. If a
+cache miss happens, `collect.py` falls back to a full pull rather than emitting a
+half-empty workbook.
+
+Local dashboard: `python -m http.server 5173 --directory web`, with a git-ignored
+`web/config.local.js` supplying `window.PROPLINE_CONFIG`.
 
 **Open question — the scoring weights.** `WEIGHTS` in `propline/scoring.py` is a v1 draft
 by Claude, NOT the client's rules. It is the only part of the system encoding betting

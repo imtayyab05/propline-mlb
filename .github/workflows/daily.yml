@@ -1,24 +1,32 @@
 name: Daily slate
 
-# Two automatic runs a day, plus a manual trigger behind the dashboard's
-# "Update Now" button.
+# Five runs a day, because confirmed lineups are worth chasing: MLB posts them only
+# ~2-4h before each game's first pitch, and start times are staggered from early
+# afternoon to late evening. One afternoon run would leave whole games on projected
+# lineups all day.
 #
-#   morning   13:00 UTC (09:00 ET) - full stats pull, PROJECTED lineups
-#   afternoon 21:00 UTC (17:00 ET) - re-pull, CONFIRMED lineups for the evening slate
+#   13:00 UTC  09:00 ET  FULL pull   - stats + projected lineups (the early read)
+#   15:30 UTC  11:30 ET  reuse       - day games (~13:05 ET) now confirmed
+#   18:00 UTC  14:00 ET  reuse       - late-afternoon games confirmed
+#   21:00 UTC  17:00 ET  reuse       - evening games confirmed
+#   23:00 UTC  19:00 ET  reuse       - late/west-coast games confirmed
 #
-# Confirmed lineups only post ~2-4h before first pitch, so the afternoon run is what
-# turns the morning's early read into verified picks. Day games starting ~13:05 ET are
-# the known gap: their lineups confirm around 11:00 ET, after the morning run and
-# before the afternoon one. Adding a third cron at 16:00 UTC would close that if the
-# client wants it.
+# Cost control: only the 13:00 run downloads from Baseball Savant. Season stats do not
+# change during the day, so the later runs restore that download from the cache and
+# refresh lineups only — roughly 2 minutes instead of 10. That keeps the month near
+# 900 of the 2,000 free Actions minutes a private repo gets, rather than blowing past
+# it. It is also far politer to Savant.
 #
-# NOTE: GitHub's scheduled runs are best-effort and can be delayed under load. The
-# manual trigger exists partly as the escape hatch for that.
+# GitHub's scheduled runs are best-effort and can be delayed under load; the manual
+# trigger behind the dashboard button is the escape hatch.
 
 on:
   schedule:
     - cron: '0 13 * * *'
+    - cron: '30 15 * * *'
+    - cron: '0 18 * * *'
     - cron: '0 21 * * *'
+    - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
       slate_date:
@@ -31,8 +39,12 @@ on:
         default: 'L10'
         type: choice
         options: ['L10', 'L5']
+      full_pull:
+        description: 'Re-download everything from Savant (slower)'
+        required: false
+        default: false
+        type: boolean
 
-# Never let two runs write the same slate at once.
 concurrency:
   group: propline-slate
   cancel-in-progress: false
@@ -59,25 +71,47 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Work out which slate and which run this is
+      - name: Work out the slate, the run type, and whether to re-download
         id: cfg
         run: |
           DATE="${{ inputs.slate_date }}"
           if [ -z "$DATE" ]; then DATE=$(date -u +%F); fi
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            KIND=manual
-          elif [ "${{ github.event.schedule }}" = "0 13 * * *" ]; then
-            KIND=scheduled_morning
-          else
-            KIND=scheduled_afternoon
-          fi
-          echo "kind=$KIND" >> "$GITHUB_OUTPUT"
-          echo "Slate $DATE ($KIND)"
+          case "${{ github.event.schedule }}" in
+            "0 13 * * *")  KIND=scheduled_morning;   REUSE=false ;;
+            "30 15 * * *") KIND=scheduled_midday;    REUSE=true  ;;
+            "0 18 * * *")  KIND=scheduled_afternoon; REUSE=true  ;;
+            "0 21 * * *")  KIND=scheduled_evening;   REUSE=true  ;;
+            "0 23 * * *")  KIND=scheduled_late;      REUSE=true  ;;
+            *)             KIND=manual;              REUSE=true  ;;
+          esac
+
+          # A manual run defaults to reusing the cache; tick full_pull to force a
+          # fresh download.
+          if [ "${{ inputs.full_pull }}" = "true" ]; then REUSE=false; fi
+
+          echo "kind=$KIND"   >> "$GITHUB_OUTPUT"
+          echo "reuse=$REUSE" >> "$GITHUB_OUTPUT"
+          echo "Slate $DATE — $KIND (reuse cached Savant data: $REUSE)"
+
+      # Restores this slate's Savant download so the later runs of the day do not
+      # re-fetch ~70MB of pitch data. On a miss, collect.py falls back to a full pull
+      # on its own, so a cold cache degrades gracefully rather than failing.
+      - name: Restore today's Savant download
+        uses: actions/cache@v4
+        with:
+          path: data/raw/${{ steps.cfg.outputs.date }}
+          key: savant-${{ steps.cfg.outputs.date }}
 
       - name: Collect
-        run: python scripts/collect.py --date "${{ steps.cfg.outputs.date }}"
+        run: |
+          EXTRA=""
+          if [ "${{ steps.cfg.outputs.reuse }}" = "true" ]; then EXTRA="--reuse-raw"; fi
+          python scripts/collect.py \
+            --date "${{ steps.cfg.outputs.date }}" \
+            --run-kind "${{ steps.cfg.outputs.kind }}" \
+            $EXTRA
 
       - name: Process and publish
         run: |
@@ -91,7 +125,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: props-${{ steps.cfg.outputs.date }}
+          name: props-${{ steps.cfg.outputs.date }}-${{ steps.cfg.outputs.kind }}
           path: data/picks/*.xlsx
           if-no-files-found: warn
           retention-days: 30
