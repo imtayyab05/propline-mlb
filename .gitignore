@@ -17,3 +17,10 @@ __pycache__/
 
 # local dashboard config (contains the publishable key only, still not committed)
 web/config.local.js
+
+# delivery artefacts — built from the repo, never part of it
+*.zip
+samples/
+
+# Word lock files
+~$*
