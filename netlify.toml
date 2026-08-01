@@ -1,0 +1,21 @@
+# Netlify deployment. The Vercel equivalent lives in vercel.json — both are kept so
+# the project can move hosts without code changes.
+
+[build]
+  # Static dashboard; no build step, so nothing to compile.
+  publish = "web"
+  command = ""
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Function paths (/api/config, /api/trigger) are declared inside each function via
+# `export const config`, so no redirects are needed here.
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "strict-origin-when-cross-origin"
