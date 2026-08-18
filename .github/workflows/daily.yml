@@ -22,16 +22,23 @@ name: Daily slate
 # 900 of the 2,000 free Actions minutes a private repo gets, rather than blowing past
 # it. It is also far politer to Savant.
 #
-# GitHub's scheduled runs are best-effort and can be delayed under load; the manual
-# trigger behind the dashboard button is the escape hatch.
+# The five daily runs are dispatched by Netlify scheduled functions, not by GitHub —
+# see the note on the `on:` block below for why. The dashboard's Update Now button
+# hits the same workflow_dispatch entry point.
 
 on:
-  schedule:
-    - cron: '7 13 * * *'
-    - cron: '37 15 * * *'
-    - cron: '7 18 * * *'
-    - cron: '7 21 * * *'
-    - cron: '7 23 * * *'
+  # NO `schedule:` here on purpose.
+  #
+  # Netlify's scheduled functions drive the five daily runs (see
+  # netlify/functions/scheduled-slate*.mjs). GitHub's own scheduler was added first,
+  # failed to fire for a full day, and Netlify was brought in to replace it — but the
+  # GitHub block was left in place as a backstop. When GitHub's scheduler recovered,
+  # every slot began firing twice, and `cancel-in-progress: false` meant the duplicate
+  # queued and ran to completion rather than being dropped. That doubled consumption
+  # to ~110 minutes a day and exhausted the 2,000 free monthly minutes by the 18th.
+  #
+  # One scheduler only. If Netlify's ever proves unreliable, move the schedule back
+  # here and remove the Netlify functions — but never run both.
   workflow_dispatch:
     inputs:
       slate_date:
@@ -52,7 +59,10 @@ on:
 
 concurrency:
   group: propline-slate
-  cancel-in-progress: false
+  # Cancel rather than queue. Two overlapping dispatches produce the same board, so
+  # letting both run to completion only doubles the minutes — which is exactly how the
+  # free tier was exhausted on 18 Aug.
+  cancel-in-progress: true
 
 jobs:
   slate:
