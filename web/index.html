@@ -205,6 +205,7 @@
   .b-conf{background:rgba(62,207,142,.15);color:var(--good)}
   .b-proj{background:rgba(245,185,66,.15);color:var(--warn)}
   .b-err{background:rgba(255,107,107,.15);color:var(--bad)}
+  .b-scr{background:rgba(255,107,107,.15);color:var(--bad);text-decoration:line-through}
 
   button,select,input{font:inherit;color:var(--text);background:var(--panel2);
         border:1px solid var(--line);border-radius:9px;padding:8px 12px;
@@ -390,6 +391,7 @@
       <option value="">Any lineup status</option>
       <option value="confirmed">Confirmed only</option>
       <option value="projected">Projected only</option>
+      <option value="scratched">Scratched only</option>
     </select>
     <div class="spacer"></div>
     <button id="xlsx" title="The full generated workbook: every category on its own tab">Download Excel</button>
@@ -690,12 +692,14 @@ async function loadFreshness(){
     {select:'status', game_date:`eq.${slateDate}`}).catch(()=>[]);
   const conf = counts.filter(r=>r.status==='confirmed').length;
   const proj = counts.filter(r=>r.status==='projected').length;
+  const scr  = counts.filter(r=>r.status==='scratched').length;
   const games = await sb('games', {select:'game_pk', game_date:`eq.${slateDate}`})
                       .catch(()=>[]);
   $('#slateinfo').innerHTML =
     `${games.length} games · ` +
     (conf ? `<span class="badge b-conf">${conf} confirmed</span> ` : '') +
     (proj ? `<span class="badge b-proj">${proj} projected</span>` : '') +
+    (scr ? ` <span class="badge b-scr">${scr} scratched</span>` : '') +
     (proj && !conf ? ' — confirmed lineups post 2–4h before first pitch' : '');
 }
 
@@ -772,7 +776,9 @@ function render(){
     const badge = r.lineup_status === 'confirmed'
       ? '<span class="badge b-conf">confirmed</span>'
       : r.lineup_status === 'projected'
-        ? '<span class="badge b-proj">projected</span>' : '';
+        ? '<span class="badge b-proj">projected</span>'
+      : r.lineup_status === 'scratched'
+        ? '<span class="badge b-scr">scratched</span>' : '';
     return `<tr ${st}>
       <td class="rank">${r.rank}</td>
       <td class="name">${esc(r.subject_name)}</td>
