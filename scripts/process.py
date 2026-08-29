@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
+from propline.profiles import batter_profiles, pitcher_profiles  # noqa: E402
 from propline.publish import publish_slate  # noqa: E402
 from propline.storage import upload_workbook  # noqa: E402
 from propline.rationale import (TOTALS_SYSTEM, add_rationales,
@@ -76,6 +77,14 @@ def main() -> int:
     pa = pd.read_csv(raw_dir / "pitcher_pitch_arsenal_stats.csv")
     season = pd.read_csv(raw_dir / "batter_expected_stats.csv")
 
+    # v2 contact-quality inputs. All from files the collector already downloads.
+    profiles = batter_profiles(
+        pd.read_csv(raw_dir / "batter_batted_ball.csv"),
+        pd.read_csv(raw_dir / "batter_exit_velocity.csv"),
+        pd.read_csv(raw_dir / "batter_bat_tracking.csv"),
+        pd.read_csv(raw_dir / "batter_stats.csv"))
+    pitchers = pitcher_profiles(pd.read_csv(raw_dir / "pitcher_stats.csv"))
+
     # --- matchups ---------------------------------------------------------------
     print("\n[1/7] Matchup engine")
     matchups = build_matchups(lineups, schedule, ba, pa)
@@ -96,7 +105,12 @@ def main() -> int:
 
     # --- scoring ----------------------------------------------------------------
     print("\n[3/7] Scoring")
-    batter_scores = score_batter_props(matchups, rolling, season, window=args.window)
+    batter_scores = score_batter_props(matchups, rolling, season, window=args.window,
+                                       profiles=profiles, pitchers=pitchers)
+    hits_rows = batter_scores[batter_scores.prop == "hits"]
+    cov = int(hits_rows["starter_whip"].notna().sum()) if "starter_whip" in hits_rows else 0
+    print(f"  ok    v2 hit inputs: WHIP on {cov}/{len(hits_rows)} rows, "
+          f"{int((hits_rows.get('gb_penalty', pd.Series(dtype=float)) > 0).sum())} ground-ball penalties")
     print(f"  ok    batters: {len(batter_scores)} rows across "
           f"{batter_scores.prop.nunique()} categories")
 

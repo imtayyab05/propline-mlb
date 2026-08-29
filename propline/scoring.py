@@ -21,16 +21,21 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .profiles import gb_penalty
+
 # --- tunable ------------------------------------------------------------------
 
 WEIGHTS = {
-    # hits: contact quality vs this arsenal, recent hit rate, avoiding strikeouts
+    # v2, to the client's spec after three days of live testing. v1 leaned on expected
+    # on-base quality, which floated high-OBP hitters who walk and single rather than
+    # collect multiple hits, and it ignored who was pitching beyond the arsenal match.
+    # Contact quality and pitcher WHIP replace that. A ground-ball penalty is applied
+    # separately, after scoring — see gb_penalty in profiles.py.
     "hits": {
-        "matchup_est_woba": 0.30,
-        "recent_hit_rate": 0.25,
-        "season_est_ba": 0.20,
-        "matchup_k_pct": -0.15,      # negative: strikeouts kill hit props
-        "lineup_spot": 0.10,         # earlier = more plate appearances
+        "recent_xwoba": 0.35,        # current form, not season-to-date
+        "contact_rate": 0.25,        # bat-to-ball: you cannot single without contact
+        "ld_sweet_index": 0.25,      # line drives and sweet-spot contact fall in
+        "starter_whip": 0.15,        # a pitcher who allows traffic allows hits
     },
     "total_bases": {
         "matchup_est_slg": 0.30,
@@ -117,7 +122,8 @@ def _shrink(recent: pd.Series, baseline: pd.Series, games: pd.Series) -> pd.Seri
 
 def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
                        season: pd.DataFrame, team_offense: pd.DataFrame | None = None,
-                       window: str = "L10") -> pd.DataFrame:
+                       window: str = "L10", profiles: pd.DataFrame | None = None,
+                       pitchers: pd.DataFrame | None = None) -> pd.DataFrame:
     """Score hits / total bases / home runs / RBIs / runs for every hitter today."""
 
     r = rolling[(rolling.window == window) & (rolling.split == "all")].copy()
@@ -144,6 +150,29 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
     df["recent_hit_rate"] = _shrink(df["recent_hit_rate"], df["season_est_ba"], df["recent_games"])
     df["recent_tb_rate"] = _shrink(df["recent_tb_rate"], df["season_est_slg"], df["recent_games"])
 
+    # --- v2 hit-model inputs -------------------------------------------------
+    # Recent xwOBA on contact is the form signal; the season figure anchors it when
+    # the recent sample is thin.
+    df["recent_xwoba"] = _shrink(df.get("xwoba_contact"), df["season_est_woba"],
+                                 df["recent_games"])
+
+    if profiles is not None and not profiles.empty:
+        df = df.merge(profiles, on="player_id", how="left")
+
+    # Line drives and sweet-spot contact both describe balls that fall in. Combined
+    # as percentiles rather than raw numbers because they sit on different scales.
+    if {"line_drive_rate", "sweet_spot_pct"} <= set(df.columns):
+        df["ld_sweet_index"] = (_pct(df["line_drive_rate"])
+                                + _pct(df["sweet_spot_pct"])) / 2
+
+    # A starter who puts runners on allows hits. Joined on the opposing starter so
+    # every hitter in a lineup shares the pitcher they actually face.
+    if pitchers is not None and not pitchers.empty:
+        w = pitchers.rename(columns={"player_id": "opp_starter_id",
+                                     "whip": "starter_whip"})
+        df = df.merge(w[["opp_starter_id", "starter_whip"]], on="opp_starter_id",
+                      how="left")
+
     # lineup-slot values
     idx = (df["batting_order"].fillna(9).astype(int) - 1).clip(0, 8)
     df["lineup_spot"] = idx.map(lambda i: SPOT_PA[i])
@@ -165,6 +194,15 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
         block = df.copy()
         block["prop"] = prop
         block["score"] = (100 * score / total_w).round(1) if total_w else 0.0
+
+        # Ground-ball hitters bleed multi-hit upside into outs and double plays.
+        # Applied after weighting, as a deduction, so it stays visible as its own
+        # number rather than disappearing inside a percentile.
+        if prop == "hits" and "ground_ball_rate" in block.columns:
+            block["gb_penalty"] = gb_penalty(block["ground_ball_rate"]).round(1)
+            block["score"] = (block["score"]
+                              - block["gb_penalty"]).clip(lower=0).round(1)
+
         out.append(block)
 
     res = pd.concat(out, ignore_index=True)

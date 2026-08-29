@@ -56,8 +56,13 @@ PULLS: list[Pull] = [
     Pull("batter_stats", "/leaderboard/custom",
          {"type": "batter", "filter": "", "min": "q", "selections": CUSTOM_SELECTIONS,
           "sort": "pa", "sortDir": "desc"}),
+    # min=20 batters faced, not "qualified". Qualified returns only 53 pitchers, which
+    # is starters with a full season of innings — so two thirds of any given day's
+    # starters are missing, and the v2 hit model needs their WHIP. Twenty is low enough
+    # to catch every starter and rookie call-up while still excluding the position
+    # players who pitched one inning of a blowout.
     Pull("pitcher_stats", "/leaderboard/custom",
-         {"type": "pitcher", "filter": "", "min": "q", "selections": CUSTOM_SELECTIONS,
+         {"type": "pitcher", "filter": "", "min": "20", "selections": CUSTOM_SELECTIONS,
           "sort": "pa", "sortDir": "desc"}),
 
     # expected stats — player and team level
