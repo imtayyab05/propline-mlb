@@ -19,15 +19,33 @@ import pandas as pd
 import requests
 
 ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-# A small model on purpose. This job is "restate two supplied numbers in a sentence",
-# not reasoning — and the 70B's free daily token quota ran out partway through a single
-# day of five scheduled runs, with Groq then asking us to wait 47 minutes. The 8B has a
-# far larger allowance, is quicker, and in side-by-side testing was actually MORE
-# accurate here: it wrote "barrelling 6.2% of batted balls" where a bigger model wrote
-# "6.2% of his swings", which is a different statistic.
-MODEL = "llama-3.1-8b-instant"
+# A small model on purpose: this job is "restate two supplied numbers in a sentence",
+# not reasoning, and the larger models burn the free daily token quota within a single
+# day of scheduled runs.
+#
+# Model history, because this WILL happen again — Groq retires models with no notice:
+#   llama-3.3-70b-versatile  -> exhausted the daily quota, then retired
+#   llama-3.1-8b-instant     -> retired 2026-08; every call 404'd mid-slate
+#   openai/gpt-oss-20b       -> current
+#
+# If this 404s, list the models the key can actually see and pick the smallest
+# instruction-following one:
+#   GET https://api.groq.com/openai/v1/models
+#
+# Rejected alternatives when choosing this one: qwen3.6-27b could not hold to the JSON
+# schema (400s), and groq/compound-mini was accurate but cost ~2x the tokens for the
+# same two sentences.
+MODEL = "openai/gpt-oss-20b"
 TIMEOUT = 120
-MAX_PER_CALL = 25          # keep each prompt small enough to stay reliable
+# Twelve, established by testing against a real slate rather than guessed.
+#
+# The cap is the model's OUTPUT length, not the input. A batch of 25 real picks is
+# ~8,000 characters in and needs 25 sentences back; gpt-oss-20b silently returns an
+# empty completion, which Groq reports as `json_validate_failed` with an empty
+# `failed_generation` — a confusing error that reads like a prompt problem and is not
+# one. Synthetic test rows are far shorter than real ones, so 25 passes in a toy test
+# and fails in production. Re-measure with real data if the model ever changes.
+MAX_PER_CALL = 12
 
 FIELD_GLOSSARY = """Field meanings:
 - matchup_est_woba / matchup_est_slg: the hitter's expected production against THIS
@@ -73,6 +91,47 @@ SYSTEM = (
     "\"best_pitch\": \"Slider\"}\n"
     "Example output: {\"id\": 0, \"text\": \"Sample Hitter projects at a .377 xwOBA "
     "versus Sample Pitcher's mix and is barrelling 9.4% of batted balls.\"}\n\n"
+    "Return strict JSON: {\"rationales\": [{\"id\": <id>, \"text\": \"...\"}]}\n\n"
+    # Smaller models paraphrase these rates into the wrong denominator, which turns a
+    # correct number into a false statement. Naming the exact mistakes fixes it; the
+    # general glossary above on its own did not.
+    "STRICT WORDING — these are the mistakes models actually make here:\n"
+    "- barrel and hard-hit rates are a share of BATTED BALLS. Never write 'of his "
+    "swings', 'of his hits', 'of his at-bats' or 'of his plate appearances'.\n"
+    "- xwOBA is a rate, not a count. Never write 'hits .400 xwOBA'; write 'projects at "
+    "a .400 xwOBA'.\n"
+    "- If recent_games is below 7, you MUST say the sample is small."
+)
+
+
+# Game and team totals have no player, no opposing starter and no rate stats — but the
+# player prompt above demands all three. Asked to explain a game total with it, the
+# model replied "No player data available for this pick.", then began returning empty
+# completions, which Groq surfaces as `json_validate_failed`. That reads like a JSON
+# bug and is really a prompt that does not match the rows being sent.
+TOTALS_SYSTEM = (
+    "You write one-sentence explanations for baseball GAME TOTAL and TEAM TOTAL picks.\n"
+    "These are about run scoring across a whole game, not about an individual player. "
+    "There is deliberately no player in the input - never ask for one, and never say "
+    "data is missing.\n\n"
+    "Field meanings:\n"
+    "- teams / team: the matchup, or the team the pick is on\n"
+    "- venue: the ballpark\n"
+    "- park_runs: park run factor, 100 = neutral, higher favours scoring\n"
+    "- combined_offense_desc / lineup_matchup_woba_desc: how the lineup(s) project "
+    "against the starting pitching they face (quiet / average / strong)\n"
+    "- combined_bullpen_tired_desc / opp_bullpen_tired_desc: bullpen condition "
+    "(rested / moderately worked / short-handed)\n"
+    "- opp_starter_weak_desc: how hittable the opposing starter has been "
+    "(tough / average / hittable)\n\n"
+    "Rules:\n"
+    "- ONE complete sentence per pick, 12-22 words.\n"
+    "- Name the teams or the team, then give two reasons from the fields provided.\n"
+    "- The _desc fields are already plain English. Use those words; never invent "
+    "numbers for them. park_runs is a real number and may be quoted.\n"
+    "- Plain language. No hype, no betting advice, no guarantees.\n\n"
+    "Example output: {\"id\": 0, \"text\": \"Both lineups project strongly at Truist "
+    "Park and the Braves bullpen is short-handed after heavy use.\"}\n\n"
     "Return strict JSON: {\"rationales\": [{\"id\": <id>, \"text\": \"...\"}]}"
 )
 
@@ -131,11 +190,11 @@ def _retry_after(resp) -> float:
     return float(m.group(1)) if m else 5.0
 
 
-def _call(rows: list[dict], api_key: str) -> dict[int, str]:
+def _call(rows: list[dict], api_key: str, system: str = None) -> dict[int, str]:
     body = {
         "model": MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system or SYSTEM},
             {"role": "user", "content": _payload(rows)},
         ],
         "temperature": 0.2,
@@ -164,7 +223,8 @@ def _call(rows: list[dict], api_key: str) -> dict[int, str]:
 
 
 def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
-                   top_n: int = 15, api_key: str | None = None) -> pd.DataFrame:
+                   top_n: int = 15, api_key: str | None = None,
+                   system: str | None = None) -> pd.DataFrame:
     """Attach a `rationale` column to the top N rows of a scored frame.
 
     Only the shortlist gets sent — there is no value in explaining pick #180, and it
@@ -195,16 +255,36 @@ def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
                     item[f] = str(v)
         rows.append(item)
 
+    # Degrade gracefully. Groq is the least reliable dependency in the pipeline — models
+    # get retired, quotas bite, and this one intermittently returns an empty completion —
+    # so a failure must cost only the sentences it actually lost. Previously one bad
+    # chunk returned early and discarded every rationale already collected for that
+    # category, turning a partial failure into a total one.
     texts: dict[int, str] = {}
+    split = 0
     for i in range(0, len(rows), MAX_PER_CALL):
         chunk = rows[i:i + MAX_PER_CALL]
         try:
-            got = _call(chunk, api_key)
+            got = _call(chunk, api_key, system)
+            texts.update({k + i: v for k, v in got.items()})
         except Exception as exc:  # noqa: BLE001 — never let this break the pipeline
-            print(f"  WARN  rationale generation failed for {label}: {exc}")
-            return df
-        texts.update({k + i: v for k, v in got.items()})
+            # Retry at half size: an empty completion is usually the model running out
+            # of output room, which a smaller batch fixes.
+            split += 1
+            half = max(1, len(chunk) // 2)
+            for j in range(0, len(chunk), half):
+                sub = chunk[j:j + half]
+                try:
+                    got = _call(sub, api_key, system)
+                    texts.update({k + i + j: v for k, v in got.items()})
+                except Exception:
+                    print(f"  WARN  {label}: {len(sub)} picks unexplained ({exc})")
+                time.sleep(PAUSE_BETWEEN_CALLS)
         time.sleep(PAUSE_BETWEEN_CALLS)
+
+    if texts:
+        note = f", {split} chunk(s) split" if split else ""
+        print(f"  ok    {label}: {len(texts)}/{len(rows)} explained{note}")
 
     for pos, idx in enumerate(top.index):
         if pos in texts:

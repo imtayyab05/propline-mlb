@@ -24,3 +24,7 @@ samples/
 
 # Word lock files
 ~$*
+
+# run logs
+*.log
+run.txt

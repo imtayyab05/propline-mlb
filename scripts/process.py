@@ -23,7 +23,8 @@ from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
 from propline.publish import publish_slate  # noqa: E402
 from propline.storage import upload_workbook  # noqa: E402
-from propline.rationale import add_rationales, label_internal_indexes  # noqa: E402
+from propline.rationale import (TOTALS_SYSTEM, add_rationales,
+                                label_internal_indexes)  # noqa: E402
 from propline.mlb import get_player_names  # noqa: E402
 from propline.output import build_picks_workbook  # noqa: E402
 from propline.rolling import rolling_pitcher_splits  # noqa: E402
@@ -141,7 +142,8 @@ def main() -> int:
         })
         game_totals = add_rationales(
             game_totals, ["teams", "venue", "park_runs", "combined_offense_desc",
-                          "combined_bullpen_tired_desc"], "game_total", top_n=args.explain_top)
+                          "combined_bullpen_tired_desc"], "game_total", top_n=args.explain_top,
+            system=TOTALS_SYSTEM)
 
         team_totals = label_internal_indexes(team_totals, {
             "lineup_matchup_woba": ("unfavourable", "even", "favourable"),
@@ -151,7 +153,8 @@ def main() -> int:
         team_totals = add_rationales(
             team_totals, ["team", "opponent", "opp_starter", "park_runs",
                           "lineup_matchup_woba_desc", "opp_bullpen_tired_desc",
-                          "opp_starter_weak_desc"], "team_total", top_n=args.explain_top)
+                          "opp_starter_weak_desc"], "team_total", top_n=args.explain_top,
+            system=TOTALS_SYSTEM)
         done = int(batter_scores.rationale.notna().sum())
         print(f"  ok    {done} batter picks explained")
     else:
