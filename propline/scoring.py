@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .mlb import effective_bat_side
 from .profiles import gb_penalty
 
 # --- tunable ------------------------------------------------------------------
@@ -37,12 +38,26 @@ WEIGHTS = {
         "ld_sweet_index": 0.25,      # line drives and sweet-spot contact fall in
         "starter_whip": 0.15,        # a pitcher who allows traffic allows hits
     },
-    "total_bases": {
-        "matchup_est_slg": 0.30,
-        "recent_tb_rate": 0.25,
-        "season_est_slg": 0.20,
-        "recent_barrel_pct": 0.15,
-        "lineup_spot": 0.10,
+    # v2 total bases: a DUAL PATH, not one blended number.
+    #
+    # There are two ways to reach two total bases and they suit different hitters: a
+    # contact hitter gets there with two singles, a slugger with one double. Averaging
+    # the two signals scored both types as mediocre and let high-OBP singles hitters
+    # ride expected-on-base to the top, which is exactly what the client complained
+    # about. Each path is scored on its own and the better one wins, so a hitter only
+    # has to be good at one of them.
+    "total_bases_power": {
+        "iso_recent_14day": 0.30,          # extra bases per at-bat, recent form
+        "iso_season": 0.20,                # the same, as a stable anchor
+        "recent_barrel_pct": 0.25,         # contact hit at the ideal speed and angle
+        "recent_hard_hit": 0.10,
+        "starter_slg_allowed_vs_hand": 0.15,   # what this arm gives up to his side
+    },
+    "total_bases_volume": {
+        "recent_hit_rate": 0.35,           # two singles is two bases
+        "contact_rate": 0.25,
+        "matchup_est_woba": 0.25,
+        "lineup_spot": 0.15,               # more plate appearances, more chances
     },
     "home_runs": {
         "recent_barrel_pct": 0.30,
@@ -93,7 +108,13 @@ WEIGHTS = {
 # Which WEIGHTS entries are per-hitter. The rest are pitcher- or team-level and are
 # scored by their own functions — looping over all of WEIGHTS would score a game total
 # as if it were a batting prop.
-BATTER_PROPS = ("hits", "total_bases", "home_runs", "rbis", "runs")
+# Scored by the plain weighted-percentile loop. total_bases is absent on purpose: it
+# takes the better of two competing paths, which the loop cannot express.
+BATTER_PROPS = ("hits", "home_runs", "rbis", "runs")
+
+# A pick at or above this score is a "strict" 2+ total bases play, per the client's
+# spec. Below it the model is describing a good hitter, not a two-base expectation.
+TB_STRICT_THRESHOLD = 90.0
 
 # How much a lineup slot is worth for each prop family (index 0 = leadoff)
 SPOT_PA = [1.00, 0.97, 0.94, 0.90, 0.86, 0.82, 0.78, 0.74, 0.70]   # plate appearances
@@ -118,6 +139,39 @@ def _shrink(recent: pd.Series, baseline: pd.Series, games: pd.Series) -> pd.Seri
     w = (games.fillna(0) / FULL_WINDOW).clip(MIN_SHRINK, 1.0)
     base = baseline.fillna(recent.median())
     return recent.fillna(base) * w + base * (1 - w)
+
+
+def _weighted_score(df: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
+    """Percentile-weight a set of columns into a 0-100 score.
+
+    Columns absent from the frame are skipped and the divisor shrinks with them, so a
+    missing input dilutes the score rather than silently scoring everyone zero.
+    """
+    score = pd.Series(0.0, index=df.index)
+    used = 0.0
+    for col, w in weights.items():
+        if col not in df.columns:
+            continue
+        score += _pct(df[col]) * w
+        used += abs(w)
+    return (100 * score / used).round(1) if used else pd.Series(0.0, index=df.index)
+
+
+def _score_total_bases(df: pd.DataFrame) -> pd.DataFrame:
+    """Better of the power path and the volume path — see the WEIGHTS note."""
+    block = df.copy()
+    power = _weighted_score(block, WEIGHTS["total_bases_power"])
+    volume = _weighted_score(block, WEIGHTS["total_bases_volume"])
+
+    block["tb_power_score"] = power
+    block["tb_volume_score"] = volume
+    # Which route this hitter is actually taking, so the client can see whether a pick
+    # is a slugger or a contact bat rather than inferring it from the name.
+    block["tb_path"] = (power >= volume).map({True: "power", False: "volume"})
+    block["score"] = pd.concat([power, volume], axis=1).max(axis=1).round(1)
+    block["tb_strict"] = block["score"] >= TB_STRICT_THRESHOLD
+    block["prop"] = "total_bases"
+    return block
 
 
 def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
@@ -170,8 +224,37 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
     if pitchers is not None and not pitchers.empty:
         w = pitchers.rename(columns={"player_id": "opp_starter_id",
                                      "whip": "starter_whip"})
-        df = df.merge(w[["opp_starter_id", "starter_whip"]], on="opp_starter_id",
-                      how="left")
+        # Take every pitcher column, not just WHIP: the handedness splits live here
+        # too, and an explicit column list silently dropped them.
+        df = df.merge(w, on="opp_starter_id", how="left")
+
+    # --- pitcher split matched to the side this hitter actually stands on --------
+    # A switch hitter bats opposite the arm he faces, so his platoon split is decided
+    # by the starter rather than by him. Roughly one lineup slot in eight is a switch
+    # hitter, and applying a fixed side would hand all of them the wrong half.
+    if {"bats", "opp_starter_throws"} <= set(df.columns):
+        df["stands"] = [effective_bat_side(b, t)
+                        for b, t in zip(df["bats"], df["opp_starter_throws"])]
+        if {"slg_allowed_vs_L", "slg_allowed_vs_R"} <= set(df.columns):
+            df["starter_slg_allowed_vs_hand"] = df["slg_allowed_vs_R"].where(
+                df["stands"] == "R", df["slg_allowed_vs_L"])
+
+    # --- client-facing grades ----------------------------------------------------
+    # A letter for how the hitter handles this starter's actual mix. The underlying
+    # number is an expected wOBA against a weighted arsenal, which is precise but not
+    # scannable; the client wants to glance down a column and see the shape of a slate.
+    if "matchup_est_woba" in df.columns:
+        q = _pct(df["matchup_est_woba"])
+        df["pitch_matchup_grade"] = pd.cut(
+            q, [-0.01, 0.2, 0.4, 0.6, 0.8, 1.01],
+            labels=["D", "C", "B", "A", "A+"]).astype("object")
+
+    # A starter in the top tier at preventing barrels is a warning on any power pick,
+    # so it is surfaced as a flag rather than left buried inside the matchup number.
+    if "starter_barrel_pct_allowed" in df.columns:
+        low = _pct(df["starter_barrel_pct_allowed"]) <= 0.25
+        df["pitcher_barrel_suppression_flag"] = low.map(
+            {True: "SUPPRESSES BARRELS", False: ""})
 
     # lineup-slot values
     idx = (df["batting_order"].fillna(9).astype(int) - 1).clip(0, 8)
@@ -182,7 +265,7 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
     # a starter who gives up hard contact is good news for HR props
     df["starter_hr_prone"] = df["starter_est_woba_allowed"]
 
-    out = []
+    out = [_score_total_bases(df)]
     for prop in BATTER_PROPS:
         weights = WEIGHTS[prop]
         score = pd.Series(0.0, index=df.index)

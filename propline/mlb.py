@@ -255,6 +255,47 @@ def get_lineups(game_date, schedule_df=None, session=None) -> pd.DataFrame:
     return out.sort_values(["game_pk", "home_away", "batting_order"]).reset_index(drop=True)
 
 
+def get_player_details(player_ids, session=None) -> dict[int, dict]:
+    """id -> {name, bats, throws} for any MLBAM ids.
+
+    Handedness matters for the v2 models: the client wants pitcher splits applied
+    against the hand a hitter actually bats with today. Savant's swing-path file
+    carries a side, but only for qualified hitters (200 of 252 lineup slots) and it
+    has no notion of switch hitters. The official endpoint has all three for
+    everyone, and it is the same request we already make for names.
+    """
+    session = session or _session()
+    ids = sorted({int(i) for i in player_ids if pd.notna(i)})
+    out: dict[int, dict] = {}
+    for i in range(0, len(ids), 100):
+        batch = ids[i:i + 100]
+        data = _get(session, "/people", personIds=",".join(map(str, batch)))
+        for p in data.get("people", []):
+            out[int(p["id"])] = {
+                "name": p.get("fullName"),
+                "bats": (p.get("batSide") or {}).get("code"),      # L / R / S
+                "throws": (p.get("pitchHand") or {}).get("code"),  # L / R
+            }
+        time.sleep(PAUSE)
+    return out
+
+
+def effective_bat_side(bats: str | None, pitcher_throws: str | None) -> str | None:
+    """Which side a hitter actually stands on for this matchup.
+
+    A switch hitter bats opposite the arm he faces, so his platoon split depends on
+    the starter rather than on him. Treating "S" as a fixed side would apply the
+    wrong half of every pitcher split to roughly one hitter in eight.
+    """
+    if bats != "S":
+        return bats
+    if pitcher_throws == "R":
+        return "L"
+    if pitcher_throws == "L":
+        return "R"
+    return None
+
+
 def get_player_names(player_ids, session=None) -> dict[int, str]:
     """id -> name for any MLBAM ids, straight from the official people endpoint.
 

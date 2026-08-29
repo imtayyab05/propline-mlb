@@ -10,6 +10,8 @@ client asks for later.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 
 # Statcast marks a barrel as launch_speed_angle == 6
@@ -17,8 +19,32 @@ BARREL = 6
 HARD_HIT_MPH = 95.0
 
 HIT_EVENTS = {"single": 1, "double": 2, "triple": 3, "home_run": 4}
+
+# Plate appearances that are not at-bats. ISO and slugging are per AB, so counting
+# walks in the denominator would quietly punish patient hitters — the exact profile
+# the client is trying to separate from genuine extra-base power.
+NON_AB_EVENTS = {"walk", "intent_walk", "hit_by_pitch", "sac_fly", "sac_bunt",
+                 "sac_fly_double_play", "sac_bunt_double_play", "catcher_interf"}
 # Events that end a plate appearance (used for PA counting)
 PA_EVENTS_EXCLUDED: set[str] = set()
+
+
+# Statcast returns 68 columns; the aggregates below use 13. Reading the rest costs
+# roughly five times the memory for nothing, and on a three-week pull that was enough
+# to exhaust the heap mid-run on a normal desktop.
+RAW_COLUMNS = [
+    "game_date", "game_pk", "batter", "pitcher", "player_name",
+    "stand", "p_throws", "events", "description",
+    "launch_speed", "launch_angle", "launch_speed_angle",
+    "estimated_woba_using_speedangle",
+]
+
+
+def read_raw(path) -> pd.DataFrame:
+    """Load a raw Statcast export with only the columns the aggregates need."""
+    header = pd.read_csv(path, nrows=0).columns
+    cols = [c for c in RAW_COLUMNS if c in header]
+    return pd.read_csv(path, usecols=cols, low_memory=False)
 
 
 def _prep(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,9 +63,18 @@ def _agg(g: pd.DataFrame) -> pd.Series:
     ev = g["launch_speed"]
     hits = g["events"].map(HIT_EVENTS).fillna(0)
 
+    ab = int(pa - g["events"].isin(NON_AB_EVENTS).sum())
+    tb = int(hits.sum())
+
     return pd.Series({
         "games": g["game_pk"].nunique(),
         "pa": int(pa),
+        "ab": ab,
+        # ISO is slugging minus average: extra bases per at-bat, stripped of singles.
+        # This is the signal that separates a doubles hitter from a slap hitter, which
+        # a raw xwOBA cannot do.
+        "iso": round((tb - int((hits > 0).sum())) / ab, 3) if ab else None,
+        "slg": round(tb / ab, 3) if ab else None,
         "bbe": int(bbe),
         "hits": int((hits > 0).sum()),
         "total_bases": int(hits.sum()),
@@ -67,9 +102,17 @@ def _pitcher_agg(g: pd.DataFrame) -> pd.Series:
     ]).sum()
     hits = g["events"].map(HIT_EVENTS).fillna(0)
 
+    ab_against = int(bf - g["events"].isin(NON_AB_EVENTS).sum())
+    tb_against = int(hits.sum())
+
     return pd.Series({
         "games": g["game_pk"].nunique(),
         "batters_faced": int(bf),
+        # Slugging allowed, which is the thing the client wants split by batter hand:
+        # how badly this starter suppresses extra-base contact from lefties vs righties.
+        "slg_allowed": round(tb_against / ab_against, 3) if ab_against else None,
+        "iso_allowed": round((tb_against - int((hits > 0).sum())) / ab_against, 3)
+                       if ab_against else None,
         "pitches": int(len(g)),
         "strikeouts": int(ks),
         "walks": int(g["events"].isin(["walk", "intent_walk"]).sum()),
@@ -94,6 +137,63 @@ def _windowed(df: pd.DataFrame, id_col: str, window: int) -> pd.DataFrame:
     gm["gm_rank"] = gm.groupby(id_col).cumcount() + 1
     keep = gm[gm.gm_rank <= window][[id_col, "game_pk"]]
     return df.merge(keep, on=[id_col, "game_pk"], how="inner")
+
+
+def _day_window(df: pd.DataFrame, days: int, as_of=None) -> pd.DataFrame:
+    """Keep rows inside the last `days` CALENDAR days.
+
+    The L5/L10 windows above count a player's own games, which is the right unit for
+    "recent form" — a hitter who sat two days still gets a full five games. The
+    client's v2 spec asks specifically for 14-DAY figures, which is a different
+    question and a genuinely different number for anyone who has been rested or
+    platooned. Both are offered rather than quietly substituting one for the other.
+    """
+    if df.empty:
+        return df
+    end = as_of or df["game_date"].max()
+    start = end - timedelta(days=days - 1)
+    return df[(df["game_date"] >= start) & (df["game_date"] <= end)]
+
+
+def rolling_batter_days(raw: pd.DataFrame, days: int = 14, by_hand: bool = False,
+                        as_of=None) -> pd.DataFrame:
+    """Per-batter aggregates over the last N calendar days.
+
+    Feeds iso_recent_14day and the other 14-day columns in the v2 spec.
+    """
+    df = _day_window(_prep(raw), days, as_of)
+    if df.empty:
+        return pd.DataFrame()
+
+    splits = [("all", df)]
+    if by_hand:
+        splits += [("vsL", df[df.p_throws == "L"]), ("vsR", df[df.p_throws == "R"])]
+
+    frames = []
+    for label, part in splits:
+        if part.empty:
+            continue
+        out = (part.groupby(["batter", "player_name"], as_index=False)
+                   .apply(_agg, include_groups=False).reset_index(drop=True))
+        ids = part[["batter", "player_name"]].drop_duplicates().reset_index(drop=True)
+        if "batter" not in out.columns:
+            out = pd.concat([ids, out], axis=1)
+        out["window"] = f"D{days}"
+        out["split"] = label
+        frames.append(out)
+
+    if not frames:
+        return pd.DataFrame()
+
+    res = pd.concat(frames, ignore_index=True).rename(columns={"batter": "player_id"})
+    for c in ("player_id", "games", "pa", "ab", "bbe", "hits", "total_bases",
+              "home_runs", "strikeouts", "walks"):
+        if c in res.columns:
+            res[c] = res[c].fillna(0).astype("int64")
+
+    front = ["player_id", "player_name", "window", "split", "games", "pa"]
+    cols = front + [c for c in res.columns if c not in front]
+    return res[cols].sort_values("pa", ascending=False).reset_index(drop=True)
 
 
 def rolling_pitcher_splits(raw: pd.DataFrame, windows=(5, 10), by_hand=True,
@@ -187,7 +287,7 @@ def rolling_batter_splits(raw: pd.DataFrame, windows=(5, 10), by_hand=True) -> p
 
     # _agg returns a mixed-type Series, which pandas widens to float across the board.
     # Counts must stay integers or they surface as "3.0 games" in the client's Excel.
-    int_cols = ["player_id", "games", "pa", "bbe", "hits", "total_bases",
+    int_cols = ["player_id", "games", "pa", "ab", "bbe", "hits", "total_bases",
                 "home_runs", "strikeouts", "walks"]
     for c in int_cols:
         if c in res.columns:

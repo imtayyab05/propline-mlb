@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from propline.db import load_env, log_run  # noqa: E402
 from propline.intermediate import build_intermediate  # noqa: E402
 from propline.mlb import (get_bullpen_usage, get_lineups, get_schedule)  # noqa: E402
-from propline.rolling import rolling_batter_splits  # noqa: E402
+from propline.rolling import (read_raw, rolling_batter_days,  # noqa: E402
+                              rolling_batter_splits)
 from propline.savant import (pull_leaderboards, pull_park_factors,  # noqa: E402
                              pull_statcast_search)
 
@@ -35,7 +36,8 @@ from propline.savant import (pull_leaderboards, pull_park_factors,  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description="PropLine MLB — daily collection")
     ap.add_argument("--date", default=date.today().isoformat())
-    ap.add_argument("--windows", type=int, nargs="*", default=[5, 10])
+    ap.add_argument("--windows", type=int, nargs="*", default=[5, 10, 14],
+                    help="rolling day-windows for the bat-tracking pulls. 14 is here because the v2 spec asks for 14-day contact and whiff rates.")
     ap.add_argument("--hands", nargs="*", default=["L", "R"], choices=["L", "R"])
     ap.add_argument("--raw-days", type=int, default=21,
                     help="days of raw pitch data to pull for rolling splits")
@@ -87,17 +89,24 @@ def main() -> int:
 
     # 3. Raw pitch-level data -> rolling L5/L10
     rolling = pd.DataFrame()
+    day14 = pd.DataFrame()
     if reuse:
         print(f"\n[3/5] Rolling splits — recomputed from the cached pitch data")
-        raw = pd.read_csv(existing_raw[-1], low_memory=False)
+        raw = read_raw(existing_raw[-1])
         rolling = rolling_batter_splits(raw, windows=tuple(args.windows))
-        print(f"  ok    rolling splits: {len(rolling)} rows")
+        # Calendar-day aggregates, kept separate from the game-based windows above:
+        # 14 days and 14 games are different questions for anyone who has been rested.
+        day14 = rolling_batter_days(raw, days=14)
+        print(f"  ok    rolling splits: {len(rolling)} rows, 14-day: {len(day14)} batters")
     elif not args.skip_raw:
         print(f"\n[3/5] Raw pitch data (last {args.raw_days}d) + rolling splits")
         start = (as_of - timedelta(days=args.raw_days)).isoformat()
         raw = pull_statcast_search(start, day, year, raw_dir)
         rolling = rolling_batter_splits(raw, windows=tuple(args.windows))
-        print(f"  ok    rolling splits: {len(rolling)} rows")
+        # Calendar-day aggregates, kept separate from the game-based windows above:
+        # 14 days and 14 games are different questions for anyone who has been rested.
+        day14 = rolling_batter_days(raw, days=14)
+        print(f"  ok    rolling splits: {len(rolling)} rows, 14-day: {len(day14)} batters")
     else:
         print("\n[3/5] Raw pitch data — SKIPPED (no L5/L10 this run)")
 
@@ -131,6 +140,8 @@ def main() -> int:
     extra = {"schedule": schedule, "lineups": lineups, "bullpen_status": bullpen}
     if not rolling.empty:
         extra["rolling_splits"] = rolling
+    if not day14.empty:
+        extra["rolling_14day"] = day14
     sheets = build_intermediate(raw_dir, out_xlsx, extra=extra)
     print(f"  ok    {out_xlsx}  ({len(sheets)} sheets)")
 

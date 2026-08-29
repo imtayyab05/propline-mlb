@@ -32,7 +32,8 @@ def _as_pct(s: pd.Series) -> pd.Series:
 
 
 def batter_profiles(batted_ball: pd.DataFrame, exit_velocity: pd.DataFrame,
-                    bat_tracking: pd.DataFrame, stats: pd.DataFrame) -> pd.DataFrame:
+                    bat_tracking: pd.DataFrame, stats: pd.DataFrame,
+                    day14: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per batter: contact quality signals used by the v2 hit model.
 
     Savant spells the id column differently in every file, so each is normalised to
@@ -82,8 +83,25 @@ def batter_profiles(batted_ball: pd.DataFrame, exit_velocity: pd.DataFrame,
         st["contact_rate"] = 100 - pd.to_numeric(st["whiff_percent"], errors="coerce")
         out = out.merge(st[["player_id", "contact_rate"]], on="player_id", how="left")
 
+    # --- isolated power ---------------------------------------------------------
+    # ISO = slugging minus average: extra bases per at-bat with singles stripped out.
+    # This is the number that separates a doubles hitter from a slap hitter, and it is
+    # the core of the v2 total-bases model.
+    if {"slg_percent", "batting_avg"} <= set(st.columns):
+        iso = st[["player_id"]].copy()
+        iso["iso_season"] = (_num(st, "slg_percent") - _num(st, "batting_avg")).round(3)
+        out = out.merge(iso, on="player_id", how="left")
+
+    if day14 is not None and not day14.empty:
+        d = day14[day14.get("split", "all") == "all"] if "split" in day14 else day14
+        cols = [c for c in ("player_id", "iso", "ab", "games") if c in d.columns]
+        d = d[cols].rename(columns={"iso": "iso_recent_14day",
+                                    "ab": "ab_14day", "games": "games_14day"})
+        out = out.merge(d, on="player_id", how="left")
+
     keep = ["player_id", "line_drive_rate", "ground_ball_rate", "sweet_spot_pct",
-            "contact_rate"]
+            "contact_rate", "iso_season", "iso_recent_14day", "ab_14day",
+            "games_14day"]
     return out[[c for c in keep if c in out.columns]]
 
 
@@ -102,7 +120,9 @@ def _ip_to_float(v) -> float | None:
         return None
 
 
-def pitcher_profiles(pitcher_stats: pd.DataFrame) -> pd.DataFrame:
+def pitcher_profiles(pitcher_stats: pd.DataFrame,
+                     pitcher_rolling: pd.DataFrame | None = None,
+                     window: str = "L10") -> pd.DataFrame:
     """Per-starter WHIP, which Savant does not publish directly.
 
     WHIP = (hits + walks) / innings pitched. All three parts are in the statistics
@@ -123,7 +143,35 @@ def pitcher_profiles(pitcher_stats: pd.DataFrame) -> pd.DataFrame:
         "innings": ip,
         "whip": ((hits + walks) / ip.replace(0, pd.NA)).round(3),
     })
-    return out.dropna(subset=["player_id"])
+    out = out.dropna(subset=["player_id"])
+
+    # Slugging allowed to left- and right-handed hitters, from the raw pitch data we
+    # already aggregate. The client asked for pitcher SLG-against by handedness; this
+    # is that, computed rather than downloaded, because no Savant leaderboard splits
+    # a pitcher's results by the batter's side.
+    if pitcher_rolling is not None and not pitcher_rolling.empty:
+        pr = pitcher_rolling[pitcher_rolling.window == window]
+        for side in ("L", "R"):
+            part = pr[pr.split == f"vs{side}"]
+            if part.empty or "slg_allowed" not in part.columns:
+                continue
+            out = out.merge(
+                part[["player_id", "slg_allowed"]].rename(
+                    columns={"slg_allowed": f"slg_allowed_vs_{side}"}),
+                on="player_id", how="left")
+
+    # Barrels allowed, regardless of hand — the input behind the suppression flag and,
+    # later, the home-run suppression cap.
+    if pitcher_rolling is not None and not pitcher_rolling.empty:
+        allsp = pitcher_rolling[(pitcher_rolling.window == window)
+                                & (pitcher_rolling.split == "all")]
+        if "barrel_pct_allowed" in allsp.columns:
+            out = out.merge(
+                allsp[["player_id", "barrel_pct_allowed"]].rename(
+                    columns={"barrel_pct_allowed": "starter_barrel_pct_allowed"}),
+                on="player_id", how="left")
+
+    return out
 
 
 def gb_penalty(ground_ball_rate: pd.Series) -> pd.Series:

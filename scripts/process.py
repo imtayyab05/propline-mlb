@@ -26,9 +26,9 @@ from propline.publish import publish_slate  # noqa: E402
 from propline.storage import upload_workbook  # noqa: E402
 from propline.rationale import (TOTALS_SYSTEM, add_rationales,
                                 label_internal_indexes)  # noqa: E402
-from propline.mlb import get_player_names  # noqa: E402
+from propline.mlb import get_player_details, get_player_names  # noqa: E402
 from propline.output import build_picks_workbook  # noqa: E402
-from propline.rolling import rolling_pitcher_splits  # noqa: E402
+from propline.rolling import read_raw, rolling_pitcher_splits  # noqa: E402
 from propline.scoring import (score_batter_props, score_game_totals,
                               score_pitcher_strikeouts)  # noqa: E402
 
@@ -82,12 +82,23 @@ def main() -> int:
         pd.read_csv(raw_dir / "batter_batted_ball.csv"),
         pd.read_csv(raw_dir / "batter_exit_velocity.csv"),
         pd.read_csv(raw_dir / "batter_bat_tracking.csv"),
-        pd.read_csv(raw_dir / "batter_stats.csv"))
-    pitchers = pitcher_profiles(pd.read_csv(raw_dir / "pitcher_stats.csv"))
+        pd.read_csv(raw_dir / "batter_stats.csv"),
+        day14=(pd.read_excel(x, "rolling_14day")
+               if "rolling_14day" in x.sheet_names else None))
+    # pitcher_rolling is built further down, so the SLG splits are attached after it
 
     # --- matchups ---------------------------------------------------------------
     print("\n[1/7] Matchup engine")
-    matchups = build_matchups(lineups, schedule, ba, pa)
+    # Handedness for everyone on the slate: hitters to pick the right pitcher split,
+    # starters to resolve which side a switch hitter will bat from.
+    ids = set(lineups.player_id.dropna()) | set(
+        schedule[["home_probable_id", "away_probable_id"]].stack().dropna())
+    details = get_player_details(ids)
+    pitcher_hand = {i: d["throws"] for i, d in details.items() if d.get("throws")}
+
+    matchups = build_matchups(lineups, schedule, ba, pa, pitcher_hand=pitcher_hand)
+    matchups["bats"] = matchups["player_id"].map(
+        lambda i: (details.get(int(i)) or {}).get("bats"))
     print(f"  ok    {len(matchups)} hitter-vs-starter matchups "
           f"({int(matchups.reliable.sum())} with reliable arsenal coverage)")
 
@@ -95,13 +106,19 @@ def main() -> int:
     print("\n[2/7] Pitcher rolling form")
     raw_files = glob.glob(str(raw_dir / "statcast_raw_*.csv"))
     if raw_files:
-        raw = pd.read_csv(raw_files[0], low_memory=False)
+        raw = read_raw(raw_files[0])
         names = get_player_names(raw.pitcher.dropna().unique())
         pitcher_rolling = rolling_pitcher_splits(raw, windows=(5, 10), name_map=names)
         print(f"  ok    {pitcher_rolling.player_id.nunique()} pitchers")
     else:
         pitcher_rolling = pd.DataFrame()
         print("  WARN  no raw pitch data — strikeout props will be skipped")
+
+
+    # Built here rather than with the other inputs: the handedness splits come from
+    # pitcher_rolling, which needs the raw pitch data loaded above.
+    pitchers = pitcher_profiles(pd.read_csv(raw_dir / "pitcher_stats.csv"),
+                                pitcher_rolling=pitcher_rolling, window=args.window)
 
     # --- scoring ----------------------------------------------------------------
     print("\n[3/7] Scoring")
