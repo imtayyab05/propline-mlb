@@ -45,6 +45,13 @@ def build_matchups(lineups: pd.DataFrame, schedule: pd.DataFrame,
                          "opp_starter": g["home_probable"]})
     starters = pd.DataFrame(starters)
 
+    # Scratched hitters are recorded in `lineups` so a late withdrawal is visible,
+    # but they are not playing, so they must never reach the board. This is the one
+    # gate every player prop passes through, which makes it the right place to drop
+    # them — filtering downstream would mean remembering to do it six times.
+    if "status" in lineups.columns:
+        lineups = lineups[lineups["status"] != "scratched"]
+
     df = lineups.merge(starters, on=["game_pk", "team_id"], how="left")
     df = df[df["opp_starter_id"].notna()].copy()
     df["opp_starter_id"] = df["opp_starter_id"].astype("int64")

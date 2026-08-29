@@ -28,3 +28,6 @@ samples/
 # run logs
 *.log
 run.txt
+
+# scratch
+.tmp_docx/

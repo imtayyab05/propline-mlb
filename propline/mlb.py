@@ -8,6 +8,7 @@ run two modes, exactly as agreed in the requirements doc:
 
   confirmed  - real posted lineups, available in the afternoon window
   projected  - each team's most recent actual batting order, used as a stand-in
+  scratched  - projected to start, absent from the lineup that actually posted
 
 Every row carries a `status` column so a projected pick is never mistaken for a
 confirmed one downstream.
@@ -193,6 +194,39 @@ def get_projected_lineups(game_date, schedule_df, session=None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# A scratched player's row keeps its original batting slot plus this offset. The
+# lineups table is keyed on (game_pk, team_id, batting_order), so a scratched hitter
+# reusing slot 3 would collide with whoever actually bats third. Offsetting keeps the
+# original slot readable (103 -> was batting 3rd) and sorts them below the real nine.
+SCRATCH_SLOT_OFFSET = 100
+
+
+def _scratched(confirmed: pd.DataFrame, projected: pd.DataFrame) -> pd.DataFrame:
+    """Players we projected to start who are absent from the posted lineup.
+
+    Previously these simply disappeared the moment a lineup confirmed, so a hitter who
+    was ranked #1 in the morning silently left the board with no explanation. Recording
+    them means a scratch is visible rather than inferred, and — more importantly — that
+    they can be excluded from picks deliberately rather than by accident.
+    """
+    if confirmed.empty or projected.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for team_id, conf_team in confirmed.groupby("team_id"):
+        proj_team = projected[projected.team_id == team_id]
+        if proj_team.empty:
+            continue
+        missing = proj_team[~proj_team.player_id.isin(set(conf_team.player_id))].copy()
+        if missing.empty:
+            continue
+        missing["status"] = "scratched"
+        missing["batting_order"] = missing["batting_order"] + SCRATCH_SLOT_OFFSET
+        rows.append(missing)
+
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
 def get_lineups(game_date, schedule_df=None, session=None) -> pd.DataFrame:
     """Confirmed lineups where available, projected everywhere else.
 
@@ -208,10 +242,15 @@ def get_lineups(game_date, schedule_df=None, session=None) -> pd.DataFrame:
     have = set(confirmed["team_id"]) if not confirmed.empty else set()
 
     projected = get_projected_lineups(game_date, schedule_df, session)
+
+    # Anyone we projected for a team that has since posted a real lineup, and who is
+    # not in it, has been scratched. Work this out before the projections are dropped.
+    scratched = _scratched(confirmed, projected)
+
     if not projected.empty:
         projected = projected[~projected["team_id"].isin(have)]
 
-    out = pd.concat([df for df in (confirmed, projected) if not df.empty],
+    out = pd.concat([df for df in (confirmed, projected, scratched) if not df.empty],
                     ignore_index=True)
     return out.sort_values(["game_pk", "home_away", "batting_order"]).reset_index(drop=True)
 
