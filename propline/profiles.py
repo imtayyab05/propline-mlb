@@ -254,6 +254,86 @@ def hr_matchup_matrix(matchups: pd.DataFrame, batter_arsenal: pd.DataFrame,
     return out
 
 
+# How many hitters ahead of a batter count as his table-setters. Three is the client's
+# number: the men most likely to still be on base when he comes up.
+TABLE_SETTERS = 3
+
+# The context multiplier discounts; it never inflates. Two reasons.
+#
+# The client's spec is worded as a discount — "if table-setters project poorly,
+# automatically discount the RBI score" — so a hitter with a good lineup around him is
+# simply not penalised, rather than being pushed above what his own bat earned.
+#
+# It also keeps every prop on the same 0-100 scale. A multiplier above 1.0 pushed RBI
+# scores past 100 while hits and home runs stayed inside it, and clipping them back
+# created ties at the very top of the board, which is the worst place to have them.
+CONTEXT_MIN, CONTEXT_MAX = 0.85, 1.00
+
+
+def lineup_context(lineups: pd.DataFrame, batter_stats: pd.DataFrame) -> pd.DataFrame:
+    """Who bats around each hitter, and how good they are at reaching base.
+
+    The client's point: runs and RBIs are bottlenecked by teammates. An elite hitter
+    with nobody on base in front of him has nobody to drive in, and no amount of
+    individual quality fixes that.
+
+    Two numbers per hitter:
+      table_setter_obp  the men batting immediately AHEAD of him — who will be on base
+                        when he bats, so this is what drives RBIs
+      top_order_obp     his team's 1-2 hitters, a proxy for how often the lineup turns
+                        over and scores at all
+
+    The order wraps: the leadoff man's table-setters are the 7-8-9 hitters, because
+    that is who is on base when he comes up in the later innings.
+    """
+    st = batter_stats.copy()
+    if "player_id" not in st.columns and "id" in st.columns:
+        st = st.rename(columns={"id": "player_id"})
+    if "on_base_percent" not in st.columns:
+        return pd.DataFrame()
+
+    obp = dict(zip(st["player_id"], pd.to_numeric(st["on_base_percent"], errors="coerce")))
+    league_obp = pd.Series(list(obp.values())).median()
+
+    # Only the nine who are actually batting: scratched hitters carry slot+100 and are
+    # not in the order at all.
+    lu = lineups[lineups.get("status", "") != "scratched"].copy()
+    lu = lu[lu["batting_order"].between(1, 9)]
+
+    rows = []
+    for (game_pk, team_id), team in lu.groupby(["game_pk", "team_id"]):
+        team = team.sort_values("batting_order")
+        order = team["player_id"].tolist()
+        n = len(order)
+        if n == 0:
+            continue
+
+        vals = [obp.get(p) for p in order]
+        vals = [v if pd.notna(v) else league_obp for v in vals]
+        top = sum(vals[:2]) / 2 if n >= 2 else vals[0]
+
+        for i, pid in enumerate(order):
+            # the TABLE_SETTERS hitters immediately before him, wrapping the order
+            ahead = [vals[(i - k) % n] for k in range(1, TABLE_SETTERS + 1)]
+            rows.append({
+                "game_pk": game_pk, "team_id": team_id, "player_id": pid,
+                "table_setter_obp": round(sum(ahead) / len(ahead), 3),
+                "top_order_obp": round(top, 3),
+            })
+
+    return pd.DataFrame(rows)
+
+
+def context_multiplier(values: pd.Series) -> pd.Series:
+    """Turn a lineup-context number into a bounded multiplier around 1.0.
+
+    Percentile-based, so it says "good for today's slate" rather than depending on
+    where league OBP happens to sit this season.
+    """
+    pct = values.rank(pct=True).fillna(0.5)
+    return (CONTEXT_MIN + pct * (CONTEXT_MAX - CONTEXT_MIN)).round(3)
+
+
 def gb_penalty(ground_ball_rate: pd.Series) -> pd.Series:
     """Points deducted from a hit score for a ground-ball-heavy profile.
 

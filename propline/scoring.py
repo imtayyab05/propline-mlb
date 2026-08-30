@@ -22,7 +22,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .mlb import effective_bat_side
-from .profiles import gb_penalty
+from .profiles import context_multiplier, gb_penalty
 
 # --- tunable ------------------------------------------------------------------
 
@@ -72,19 +72,23 @@ WEIGHTS = {
         "iso_recent_14day": 0.15,
         "recent_hard_hit": 0.10,
     },
+    # v2 runs and RBIs. The client's point: both are bottlenecked by teammates. An
+    # elite hitter with nobody on base in front of him has nobody to drive in, and no
+    # amount of individual quality fixes that. So the weights below score the hitter,
+    # and a bounded lineup-context multiplier is applied afterwards — his spec asks for
+    # a multiplier, not another weighted term, because the effect is conditional rather
+    # than additive.
     "rbis": {
-        "matchup_est_slg": 0.30,
-        "recent_tb_rate": 0.20,
+        "matchup_est_slg": 0.35,     # driving runners in is a slugging skill
+        "recent_tb_rate": 0.25,
         "rbi_spot": 0.25,            # 3-4-5 hitters bat with men on
-        "team_offense": 0.15,
-        "season_est_slg": 0.10,
+        "season_est_slg": 0.15,
     },
     "runs": {
-        "matchup_est_woba": 0.30,
+        "matchup_est_woba": 0.35,    # you cannot score without reaching base
         "run_spot": 0.25,            # 1-2-3 hitters score most
-        "recent_hit_rate": 0.20,
-        "team_offense": 0.15,
-        "matchup_k_pct": -0.10,
+        "recent_hit_rate": 0.25,
+        "matchup_k_pct": -0.15,
     },
     # team runs in a single game
     "team_total": {
@@ -190,7 +194,8 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
                        season: pd.DataFrame, team_offense: pd.DataFrame | None = None,
                        window: str = "L10", profiles: pd.DataFrame | None = None,
                        pitchers: pd.DataFrame | None = None,
-                       hr_matrix: pd.DataFrame | None = None) -> pd.DataFrame:
+                       hr_matrix: pd.DataFrame | None = None,
+                       lineup_ctx: pd.DataFrame | None = None) -> pd.DataFrame:
     """Score hits / total bases / home runs / RBIs / runs for every hitter today."""
 
     r = rolling[(rolling.window == window) & (rolling.split == "all")].copy()
@@ -257,6 +262,12 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
     if hr_matrix is not None and not hr_matrix.empty:
         df = df.merge(hr_matrix, on=["player_id", "opp_starter_id"], how="left")
 
+    # Who bats around each hitter. Joined on the lineup slot he occupies today, not on
+    # the player, because the same hitter has different men in front of him if the
+    # manager moves him.
+    if lineup_ctx is not None and not lineup_ctx.empty:
+        df = df.merge(lineup_ctx, on=["game_pk", "team_id", "player_id"], how="left")
+
     # --- client-facing grades ----------------------------------------------------
     # A letter for how the hitter handles this starter's actual mix. The underlying
     # number is an expected wOBA against a weighted arsenal, which is precise but not
@@ -299,6 +310,17 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
         # Ground-ball hitters bleed multi-hit upside into outs and double plays.
         # Applied after weighting, as a deduction, so it stays visible as its own
         # number rather than disappearing inside a percentile.
+        # Lineup context. RBIs depend on who is ON BASE ahead of the hitter; runs
+        # depend on the lineup turning over and scoring at all, which the top of the
+        # order drives. Bounded to +/-15%: teammates matter, but they cannot make a
+        # hitter a different player.
+        if prop == "rbis" and "table_setter_obp" in block.columns:
+            block["context_mult"] = context_multiplier(block["table_setter_obp"])
+            block["score"] = (block["score"] * block["context_mult"]).round(1)
+        elif prop == "runs" and "top_order_obp" in block.columns:
+            block["context_mult"] = context_multiplier(block["top_order_obp"])
+            block["score"] = (block["score"] * block["context_mult"]).round(1)
+
         # A pitcher who does not allow barrels caps the home-run outcome regardless of
         # how the hitter grades. Applied as a ceiling, not a deduction: the point is
         # that the ceiling is lower, not that the hitter is worse.

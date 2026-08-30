@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
-from propline.profiles import (batter_profiles,  # noqa: E402
+from propline.profiles import (batter_profiles, lineup_context,  # noqa: E402
                                hr_matchup_matrix, pitcher_pitch_mix,
                                pitcher_profiles)
 from propline.publish import publish_slate  # noqa: E402
@@ -134,11 +134,15 @@ def main() -> int:
         hr_matrix = hr_matchup_matrix(matchups, ba, mix)
         print(f"  ok    HR matchup matrix: {len(hr_matrix)} hitter/starter pairs")
 
+    # Who bats around each hitter today — drives the runs/RBI multipliers.
+    lineup_ctx = lineup_context(lineups, pd.read_csv(raw_dir / "batter_stats.csv"))
+    print(f"  ok    lineup context: {len(lineup_ctx)} slots")
+
     # --- scoring ----------------------------------------------------------------
     print("\n[3/7] Scoring")
     batter_scores = score_batter_props(matchups, rolling, season, window=args.window,
                                        profiles=profiles, pitchers=pitchers,
-                                       hr_matrix=hr_matrix)
+                                       hr_matrix=hr_matrix, lineup_ctx=lineup_ctx)
     hits_rows = batter_scores[batter_scores.prop == "hits"]
     cov = int(hits_rows["starter_whip"].notna().sum()) if "starter_whip" in hits_rows else 0
     print(f"  ok    v2 hit inputs: WHIP on {cov}/{len(hits_rows)} rows, "
