@@ -33,7 +33,7 @@ PA_EVENTS_EXCLUDED: set[str] = set()
 # roughly five times the memory for nothing, and on a three-week pull that was enough
 # to exhaust the heap mid-run on a normal desktop.
 RAW_COLUMNS = [
-    "game_date", "game_pk", "batter", "pitcher", "player_name",
+    "game_date", "game_pk", "batter", "pitcher", "player_name", "pitch_type",
     "stand", "p_throws", "events", "description",
     "launch_speed", "launch_angle", "launch_speed_angle",
     "estimated_woba_using_speedangle",

@@ -62,6 +62,9 @@ def batter_profiles(batted_ball: pd.DataFrame, exit_velocity: pd.DataFrame,
     # against a 50.0 threshold. Normalise on the way in.
     out["line_drive_rate"] = _as_pct(_num(out, "ld_rate"))
     out["ground_ball_rate"] = _as_pct(_num(out, "gb_rate"))
+    # Lift. The home-run model needs this explicitly: a hitter can have elite
+    # exit velocity and still never clear a fence if he hits everything on the ground.
+    out["fly_ball_rate"] = _as_pct(_num(out, "fb_rate"))
 
     # --- sweet spot -------------------------------------------------------------
     if "anglesweetspotpercent" in ev.columns:
@@ -99,7 +102,8 @@ def batter_profiles(batted_ball: pd.DataFrame, exit_velocity: pd.DataFrame,
                                     "ab": "ab_14day", "games": "games_14day"})
         out = out.merge(d, on="player_id", how="left")
 
-    keep = ["player_id", "line_drive_rate", "ground_ball_rate", "sweet_spot_pct",
+    keep = ["player_id", "line_drive_rate", "ground_ball_rate", "fly_ball_rate",
+            "sweet_spot_pct",
             "contact_rate", "iso_season", "iso_recent_14day", "ab_14day",
             "games_14day"]
     return out[[c for c in keep if c in out.columns]]
@@ -171,6 +175,82 @@ def pitcher_profiles(pitcher_stats: pd.DataFrame,
                     columns={"barrel_pct_allowed": "starter_barrel_pct_allowed"}),
                 on="player_id", how="left")
 
+    return out
+
+
+def pitcher_pitch_mix(raw: pd.DataFrame, min_pitches: int = 30) -> pd.DataFrame:
+    """How often each starter throws each pitch type, split by the batter's side.
+
+    The client asked for "pitcher pitch-mix % vs LHB/RHB". Savant's
+    pitch-arsenal-stats leaderboard cannot do this: hand, pitchHand and batSide all
+    return byte-identical results, so the split does not exist there. It does exist in
+    the raw pitch data, where every pitch carries both its type and the side the batter
+    stood on.
+
+    Usage is the share of that pitcher's pitches to that side, so the rows for one
+    pitcher and one side sum to 100.
+    """
+    df = raw[["pitcher", "stand", "pitch_type"]].dropna()
+    if df.empty:
+        return pd.DataFrame()
+
+    counts = (df.groupby(["pitcher", "stand", "pitch_type"])
+                .size().rename("pitches").reset_index())
+    totals = counts.groupby(["pitcher", "stand"])["pitches"].transform("sum")
+
+    # Below this a "mix" is noise: one changeup in a September mop-up inning is not a
+    # 33% changeup rate.
+    counts = counts[totals >= min_pitches].copy()
+    counts["usage_pct"] = (100 * counts["pitches"] / totals[counts.index]).round(1)
+    return counts.rename(columns={"pitcher": "player_id", "stand": "vs_hand"})
+
+
+def hr_matchup_matrix(matchups: pd.DataFrame, batter_arsenal: pd.DataFrame,
+                      pitch_mix: pd.DataFrame) -> pd.DataFrame:
+    """Weighted matchup matrix: hitter's value per pitch x pitcher's usage of it.
+
+    This is the client's core home-run idea. A hitter who punishes fastballs but is
+    helpless against breaking balls is a different proposition against a 60%-fastball
+    starter than against a slider-heavy one, and a single blended matchup number hides
+    exactly that. Weighting the hitter's per-pitch run value by how often this starter
+    actually throws each pitch TO HIS SIDE keeps the distinction.
+
+    Returns one row per (player_id, opp_starter_id) with the weighted value and the
+    coverage behind it.
+    """
+    need = {"player_id", "opp_starter_id", "stands"}
+    if not need <= set(matchups.columns) or pitch_mix.empty:
+        return pd.DataFrame()
+
+    rv_col = "run_value_per_100" if "run_value_per_100" in batter_arsenal.columns else None
+    if rv_col is None:
+        return pd.DataFrame()
+
+    ba = batter_arsenal.rename(columns={"player_id": "player_id"})[
+        ["player_id", "pitch_type", rv_col]].dropna()
+
+    pairs = matchups[["player_id", "opp_starter_id", "stands"]].dropna().drop_duplicates()
+    mix = pitch_mix.rename(columns={"player_id": "opp_starter_id"})
+
+    # every pitch this starter throws to this hitter's side, joined to the hitter's
+    # own record against that pitch type
+    grid = pairs.merge(mix, left_on=["opp_starter_id", "stands"],
+                       right_on=["opp_starter_id", "vs_hand"], how="left")
+    grid = grid.merge(ba, on=["player_id", "pitch_type"], how="left")
+
+    def _agg(g):
+        d = g.dropna(subset=[rv_col, "usage_pct"])
+        total = g["usage_pct"].sum()
+        if d.empty or total == 0:
+            return pd.Series({"hr_matchup_rv": None, "hr_matchup_coverage": 0.0})
+        return pd.Series({
+            "hr_matchup_rv": round(
+                float((d[rv_col] * d["usage_pct"]).sum() / d["usage_pct"].sum()), 3),
+            "hr_matchup_coverage": round(float(d["usage_pct"].sum() / total), 2),
+        })
+
+    out = (grid.groupby(["player_id", "opp_starter_id"])
+               .apply(_agg, include_groups=False).reset_index())
     return out
 
 

@@ -21,12 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
-from propline.profiles import batter_profiles, pitcher_profiles  # noqa: E402
+from propline.profiles import (batter_profiles,  # noqa: E402
+                               hr_matchup_matrix, pitcher_pitch_mix,
+                               pitcher_profiles)
 from propline.publish import publish_slate  # noqa: E402
 from propline.storage import upload_workbook  # noqa: E402
 from propline.rationale import (TOTALS_SYSTEM, add_rationales,
                                 label_internal_indexes)  # noqa: E402
-from propline.mlb import get_player_details, get_player_names  # noqa: E402
+from propline.mlb import (effective_bat_side, get_player_details,  # noqa: E402
+                          get_player_names)
 from propline.output import build_picks_workbook  # noqa: E402
 from propline.rolling import read_raw, rolling_pitcher_splits  # noqa: E402
 from propline.scoring import (score_batter_props, score_game_totals,
@@ -120,10 +123,22 @@ def main() -> int:
     pitchers = pitcher_profiles(pd.read_csv(raw_dir / "pitcher_stats.csv"),
                                 pitcher_rolling=pitcher_rolling, window=args.window)
 
+    # Weighted matchup matrix for home runs. Needs the hitter's side, which is why it
+    # is built from `matchups` after handedness has been attached rather than from the
+    # lineups directly.
+    hr_matrix = pd.DataFrame()
+    if raw_files:
+        mix = pitcher_pitch_mix(raw)
+        matchups["stands"] = [effective_bat_side(b, t) for b, t in
+                              zip(matchups["bats"], matchups.get("opp_starter_throws"))]
+        hr_matrix = hr_matchup_matrix(matchups, ba, mix)
+        print(f"  ok    HR matchup matrix: {len(hr_matrix)} hitter/starter pairs")
+
     # --- scoring ----------------------------------------------------------------
     print("\n[3/7] Scoring")
     batter_scores = score_batter_props(matchups, rolling, season, window=args.window,
-                                       profiles=profiles, pitchers=pitchers)
+                                       profiles=profiles, pitchers=pitchers,
+                                       hr_matrix=hr_matrix)
     hits_rows = batter_scores[batter_scores.prop == "hits"]
     cov = int(hits_rows["starter_whip"].notna().sum()) if "starter_whip" in hits_rows else 0
     print(f"  ok    v2 hit inputs: WHIP on {cov}/{len(hits_rows)} rows, "

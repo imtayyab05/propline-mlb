@@ -59,12 +59,18 @@ WEIGHTS = {
         "matchup_est_woba": 0.25,
         "lineup_spot": 0.15,               # more plate appearances, more chances
     },
+    # v2 home runs. The client's complaint: elite hitters scored well even when they
+    # hit the ball on the ground or into doubles rather than over the fence. Two fixes
+    # — reward LIFT explicitly, and replace the blended arsenal number with a weighted
+    # matchup matrix (his term) that keeps per-pitch detail instead of averaging it
+    # away. A hitter who mashes fastballs but flails at breaking balls should not look
+    # the same against a slider-heavy arm as against a fastball-heavy one.
     "home_runs": {
-        "recent_barrel_pct": 0.30,
-        "matchup_est_slg": 0.25,
-        "season_est_slg": 0.20,
-        "recent_hard_hit": 0.15,
-        "starter_hr_prone": 0.10,
+        "hr_matchup_rv": 0.30,        # run value per pitch x this starter's usage
+        "recent_barrel_pct": 0.25,    # barrels are the shape of a home run
+        "fly_ball_rate": 0.20,        # you cannot homer on the ground
+        "iso_recent_14day": 0.15,
+        "recent_hard_hit": 0.10,
     },
     "rbis": {
         "matchup_est_slg": 0.30,
@@ -115,6 +121,12 @@ BATTER_PROPS = ("hits", "home_runs", "rbis", "runs")
 # A pick at or above this score is a "strict" 2+ total bases play, per the client's
 # spec. Below it the model is describing a good hitter, not a two-base expectation.
 TB_STRICT_THRESHOLD = 90.0
+
+# Facing a starter in the best quartile at preventing barrels, a home-run score is
+# capped rather than merely nudged. The client asked for a strict cap: no matter how
+# good the hitter looks on paper, a pitcher who does not allow barrels is a hard
+# ceiling on the outcome the bet needs.
+HR_SUPPRESSION_CAP = 78.0
 
 # How much a lineup slot is worth for each prop family (index 0 = leadoff)
 SPOT_PA = [1.00, 0.97, 0.94, 0.90, 0.86, 0.82, 0.78, 0.74, 0.70]   # plate appearances
@@ -177,7 +189,8 @@ def _score_total_bases(df: pd.DataFrame) -> pd.DataFrame:
 def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
                        season: pd.DataFrame, team_offense: pd.DataFrame | None = None,
                        window: str = "L10", profiles: pd.DataFrame | None = None,
-                       pitchers: pd.DataFrame | None = None) -> pd.DataFrame:
+                       pitchers: pd.DataFrame | None = None,
+                       hr_matrix: pd.DataFrame | None = None) -> pd.DataFrame:
     """Score hits / total bases / home runs / RBIs / runs for every hitter today."""
 
     r = rolling[(rolling.window == window) & (rolling.split == "all")].copy()
@@ -239,6 +252,11 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
             df["starter_slg_allowed_vs_hand"] = df["slg_allowed_vs_R"].where(
                 df["stands"] == "R", df["slg_allowed_vs_L"])
 
+    # Weighted matchup matrix, joined on the hitter AND the starter he faces — the
+    # value is specific to that pairing, not a property of either alone.
+    if hr_matrix is not None and not hr_matrix.empty:
+        df = df.merge(hr_matrix, on=["player_id", "opp_starter_id"], how="left")
+
     # --- client-facing grades ----------------------------------------------------
     # A letter for how the hitter handles this starter's actual mix. The underlying
     # number is an expected wOBA against a weighted arsenal, which is precise but not
@@ -281,6 +299,15 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
         # Ground-ball hitters bleed multi-hit upside into outs and double plays.
         # Applied after weighting, as a deduction, so it stays visible as its own
         # number rather than disappearing inside a percentile.
+        # A pitcher who does not allow barrels caps the home-run outcome regardless of
+        # how the hitter grades. Applied as a ceiling, not a deduction: the point is
+        # that the ceiling is lower, not that the hitter is worse.
+        if prop == "home_runs" and "starter_barrel_pct_allowed" in block.columns:
+            suppresses = _pct(block["starter_barrel_pct_allowed"]) <= 0.25
+            block["hr_suppression_capped"] = suppresses
+            block.loc[suppresses, "score"] = block.loc[suppresses, "score"].clip(
+                upper=HR_SUPPRESSION_CAP)
+
         if prop == "hits" and "ground_ball_rate" in block.columns:
             block["gb_penalty"] = gb_penalty(block["ground_ball_rate"]).round(1)
             block["score"] = (block["score"]
