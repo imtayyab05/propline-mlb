@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .db import delete_where, read, upsert
+from .db import check_json, delete_where, read, upsert
 
 # signals stored alongside each pick so the dashboard can show the "why" without
 # recomputing anything
@@ -190,6 +190,9 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
         # top N earlier but dropped out since, keeping their old rank and score — the
         # board then reads as a blend of runs, with duplicate ranks, scores out of
         # order, and stale "projected" badges on a confirmed slate.
+        # Prove it serialises BEFORE clearing the slate, so a bad payload fails
+        # loudly with the old board still intact.
+        check_json(_ints(allp))
         delete_where("prop_picks", {"slate_date": f"eq.{slate_date}"})
         written["prop_picks"] = upsert("prop_picks", _ints(allp),
                                        on_conflict="slate_date,prop,subject_id")
@@ -217,6 +220,7 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
     if frames:
         allg = pd.concat(frames, ignore_index=True).drop_duplicates(
             subset=["slate_date", "prop", "game_pk", "subject"])
+        check_json(_ints(allg))
         delete_where("game_picks", {"slate_date": f"eq.{slate_date}"})
         written["game_picks"] = upsert("game_picks", _ints(allg),
                                        on_conflict="slate_date,prop,game_pk,subject")

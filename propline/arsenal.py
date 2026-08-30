@@ -253,9 +253,18 @@ def arsenal_summary(pitcher_arsenal: pd.DataFrame) -> pd.DataFrame:
             def _n(col, nd):
                 v = r.get(col)
                 return None if pd.isna(v) else round(float(v), nd)
+            # `or` is WRONG here: a missing pitch_name arrives as NaN, and NaN is
+            # truthy in Python, so `nan or "FC"` returns the NaN. That NaN reached
+            # json.dumps, which emits a bare NaN, and PostgREST rejected the whole
+            # prop_picks batch with "Empty or invalid json" — after publish had
+            # already deleted the slate, leaving the board empty.
+            name = r.get("pitch_name")
+            if name is None or (not isinstance(name, str) and pd.isna(name)):
+                name = r.get("pitch_type")
             out.append({
                 "side": r.get("side"),
-                "pitch": r.get("pitch_name") or r.get("pitch_type"),
+                "pitch": None if name is None or (not isinstance(name, str)
+                                                  and pd.isna(name)) else str(name),
                 "usage": _n("usage_pct", 1),
                 "velo": _n("avg_speed", 1),
                 "whiff": _n("whiff_pct", 1),

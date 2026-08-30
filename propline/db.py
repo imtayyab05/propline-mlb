@@ -46,28 +46,52 @@ def load_env(path: str | Path = ".env") -> None:
         load_dotenv(p)
 
 
+def _scalar(v):
+    """One value, made JSON-safe."""
+    if v is None or v is pd.NaT:
+        return None
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.isoformat()
+    if isinstance(v, (dict, list)):
+        return _nested(v)
+    if hasattr(v, "item"):                    # numpy scalar
+        return _scalar(v.item())
+    return v
+
+
+def _nested(v):
+    """Recurse through dicts and lists so a NaN cannot hide inside one.
+
+    The details column carries nested JSON (the pitch arsenal on strikeout picks), and
+    passing containers through untouched let a NaN reach json.dumps, which writes a
+    bare NaN. PostgREST rejects the whole batch with "Empty or invalid json" — and
+    because publish deletes the slate before inserting, that emptied the board rather
+    than leaving the previous rows in place.
+    """
+    if isinstance(v, dict):
+        return {k: _scalar(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_scalar(x) for x in v]
+    return _scalar(v)
+
+
 def _clean(records: list[dict]) -> list[dict]:
     """JSON cannot carry NaN/NaT/numpy scalars — convert them to null/native types."""
-    out = []
-    for rec in records:
-        row = {}
-        for k, v in rec.items():
-            if v is None:
-                row[k] = None
-            elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-                row[k] = None
-            elif isinstance(v, (pd.Timestamp,)):
-                row[k] = v.isoformat()
-            elif v is pd.NaT:
-                row[k] = None
-            elif hasattr(v, "item"):          # numpy scalar
-                row[k] = v.item()
-            elif isinstance(v, (dict, list)):
-                row[k] = v
-            else:
-                row[k] = v
-        out.append(row)
-    return out
+    return [{k: _scalar(v) for k, v in rec.items()} for rec in records]
+
+
+def check_json(df: pd.DataFrame) -> None:
+    """Raise if a frame will not serialise, WITHOUT touching the database.
+
+    Call this before any delete-then-insert: publish clears a slate before writing it,
+    so an insert that fails on bad JSON leaves the board empty rather than stale. One
+    NaN nested in a details payload did exactly that.
+    """
+    if df is None or df.empty:
+        return
+    json.dumps(_clean(df.to_dict(orient="records")), default=str, allow_nan=False)
 
 
 def upsert(table: str, df: pd.DataFrame, on_conflict: str | None = None,
@@ -91,7 +115,10 @@ def upsert(table: str, df: pd.DataFrame, on_conflict: str | None = None,
     sent = 0
     for i in range(0, len(records), chunk):
         batch = records[i:i + chunk]
-        payload = json.dumps(batch, default=str)
+        # allow_nan=False so a stray NaN raises here instead of being written into
+        # the body as a bare NaN, which PostgREST rejects with an opaque
+        # "Empty or invalid json" 400.
+        payload = json.dumps(batch, default=str, allow_nan=False)
 
         # Transient network failures are a fact of life on a scheduled cloud runner —
         # a dropped connection mid-publish already cost one run here. Retry the
