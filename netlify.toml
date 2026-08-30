@@ -7,6 +7,18 @@
   command = ""
   functions = "netlify/functions"
 
+  # Skip the deploy entirely when nothing Netlify actually serves has changed.
+  #
+  # Most commits here touch the Python scoring pipeline, which Netlify neither builds
+  # nor hosts — that runs on GitHub Actions. Every push was still triggering a full
+  # production deploy at 15 credits each: on one working day, 8 of 11 deploys rebuilt
+  # an unchanged site and burned 120 of a 300-credit monthly allowance.
+  #
+  # `ignore` skips the build when the command exits 0, and `git diff --quiet` exits 0
+  # when there is no difference. Comparing the last DEPLOYED commit against this one
+  # rather than HEAD^ means a push of several commits is judged as a whole.
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- web/ netlify/ netlify.toml"
+
 [functions]
   node_bundler = "esbuild"
 
