@@ -801,6 +801,7 @@ const EXTRA_COLS = {
     ['Whiff% (14d)', 'whiff_14day', pct1],
     ['Opp Lineup K%', 'opp_lineup_k_pct', pct1],
     ['WHIP', 'pitcher_whip', num3],
+    ['Vegas K', 'vegas_k_line'],
     ['Exp. Pitches', 'expected_pitch_limit'],
     ['Leash', 'leash_penalty'],
   ],
@@ -826,7 +827,7 @@ function render(){
        ${current==='strikeouts'?'':'<th>Lineup</th>'}<th>Recent</th>
        ${extra.map(c=>`<th>${esc(c[0])}</th>`).join('')}<th>Why</th></tr>`
     : `<tr><th>#</th><th>Matchup</th><th>Venue</th><th>Score</th>
-       <th>Park Runs</th><th>Why</th></tr>`;
+       <th>Vegas</th><th>vs Vegas</th><th>Park Runs</th><th>Why</th></tr>`;
 
   $('#tbody').innerHTML = data.map((r,i)=>{
     const d = r.details || {};
@@ -840,6 +841,8 @@ function render(){
         <td class="name">${esc(r.subject)}</td>
         <td class="num">${esc(r.venue||'')}</td>
         <td class="score ${scoreClass(r.score)}">${r.score}</td>
+        <td class="num">${esc(cellValue(r,'vegas_total'))}</td>
+        <td class="num">${esc(cellValue(r,'vs_vegas'))}</td>
         <td class="num">${pf}${flag}</td>
         <td class="why">${esc(r.rationale||'')}</td></tr>`;
     }

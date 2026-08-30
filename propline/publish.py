@@ -37,11 +37,14 @@ COMMON_DETAIL = ["recent_games", "recent_pa", "primary_pitch", "best_pitch_for_b
                  "arsenal_coverage"]
 
 PITCHER_DETAIL = ["split_k_matchup", "split_k_rate_matchup", "whiff_14day",
+                  "vegas_k_line",
                   "opp_lineup_k_pct", "pitcher_whip", "whip_efficiency",
                   "expected_pitch_limit", "leash_penalty", "recent_games",
                   "recent_k_per_game", "recent_k_pct"]
 
-GAME_DETAIL = ["combined_offense", "combined_starter_weak", "combined_bullpen_tired"]
+GAME_DETAIL = ["combined_offense", "combined_starter_weak",
+               "combined_bullpen_tired", "vegas_total", "vs_vegas",
+               "market_edge"]
 TEAM_DETAIL = ["lineup_matchup_woba", "opp_starter_weak", "opp_bullpen_tired",
                "recent_team_form"]
 

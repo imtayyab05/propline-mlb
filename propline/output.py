@@ -96,6 +96,7 @@ PITCHER_COLS = [
     ("opp_lineup_k_pct", "Opp Lineup K%"),
     ("pitcher_whip", "WHIP"),
     ("whip_efficiency", "WHIP Efficiency"),
+    ("vegas_k_line", "Vegas K Line"),
     ("expected_pitch_limit", "Expected Pitches"),
     ("leash_penalty", "Leash Penalty"),
     ("recent_games", "Recent G"),
@@ -113,6 +114,9 @@ TEAM_TOTAL_COLS = [
 
 GAME_TOTAL_COLS = [
     ("rank", "#"), ("teams", "Matchup"), ("venue", "Venue"), ("score", "Score"),
+    ("vegas_total", "Vegas Total"),
+    ("vs_vegas", "vs Vegas"),
+    ("market_edge", "Model-Market Gap"),
     ("park_runs", "Park Runs"), ("park_matched", "Park Data"),
     ("combined_offense", "Combined Offense"),
     ("combined_starter_weak", "Combined SP Weakness"),

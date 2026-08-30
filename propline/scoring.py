@@ -607,3 +607,36 @@ def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
     gt = gt.sort_values("score", ascending=False).reset_index(drop=True)
 
     return tt, gt
+
+
+def attach_market_edge(totals: pd.DataFrame, vegas: pd.DataFrame) -> pd.DataFrame:
+    """Put the market line beside the model score and measure the disagreement.
+
+    The client asked for a direct variance — "model projects 9.4 runs vs Vegas 8.5,
+    +0.9 edge". This model does not produce a run projection: the score is a
+    percentile ranking across the slate, not an expected number of runs, and
+    inventing a runs figure by rescaling a percentile would look precise while
+    meaning nothing.
+
+    What IS honest, and answers the same question, is comparing RANKS: where does
+    this game sit on the model board, versus where its total sits on the market
+    board. A game the model ranks in the 90th percentile that the market ranks in
+    the 40th is a disagreement worth looking at, and that is the signal he is after.
+
+    market_edge is positive when the model likes a game more than the market does.
+    """
+    if totals.empty or vegas is None or vegas.empty:
+        return totals
+
+    cols = [c for c in ("game_pk", "vegas_total", "books") if c in vegas.columns]
+    out = totals.merge(vegas[cols].drop_duplicates("game_pk"), on="game_pk", how="left")
+
+    if "vegas_total" in out.columns and out["vegas_total"].notna().any():
+        model_pct = _pct(out["score"])
+        market_pct = _pct(out["vegas_total"])
+        out["market_edge"] = (100 * (model_pct - market_pct)).round(0)
+        # A word, because a signed percentile difference is not self-explanatory.
+        out["vs_vegas"] = pd.cut(
+            out["market_edge"], [-101, -20, 20, 101],
+            labels=["market higher", "agree", "model higher"]).astype("object")
+    return out

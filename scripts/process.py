@@ -25,6 +25,9 @@ from propline.profiles import (batter_profiles, lineup_context,  # noqa: E402
                                lineup_handedness, opposing_lineup_k,
                                hr_matchup_matrix, pitcher_pitch_mix,
                                pitcher_profiles)
+from propline.odds import (attach_game_totals, attach_strikeout_lines,  # noqa: E402
+                          fetch_slate_odds, game_totals as odds_game_totals,
+                          strikeout_lines)
 from propline.publish import publish_slate  # noqa: E402
 from propline.storage import upload_workbook  # noqa: E402
 from propline.rationale import (TOTALS_SYSTEM, add_rationales,
@@ -34,7 +37,8 @@ from propline.mlb import (effective_bat_side, get_player_details,  # noqa: E402
 from propline.output import build_picks_workbook  # noqa: E402
 from propline.rolling import (read_raw, rolling_pitcher_days,  # noqa: E402
                               rolling_pitcher_splits)
-from propline.scoring import (score_batter_props, score_game_totals,
+from propline.scoring import (attach_market_edge, score_batter_props,  # noqa: E402
+                              score_game_totals,
                               score_pitcher_strikeouts)  # noqa: E402
 
 
@@ -142,6 +146,18 @@ def main() -> int:
     lineup_ctx = lineup_context(lineups, pd.read_csv(raw_dir / "batter_stats.csv"))
     print(f"  ok    lineup context: {len(lineup_ctx)} slots")
 
+    # Market lines. Fetched once per slate and cached, so the later runs of the day
+    # cost nothing — see the credit budget note in propline/odds.py.
+    vegas_totals, vegas_k = pd.DataFrame(), pd.DataFrame()
+    try:
+        odds_raw = fetch_slate_odds(day, raw_dir)
+        vegas_totals = attach_game_totals(schedule, odds_game_totals(odds_raw))
+        vegas_k = attach_strikeout_lines(schedule, strikeout_lines(odds_raw))
+        print(f"  ok    market lines: {len(vegas_totals)} totals, "
+              f"{len(vegas_k)} strikeout lines")
+    except Exception as exc:  # noqa: BLE001 — no key, or quota gone; keep going
+        print(f"  WARN  no market lines this run ({exc})")
+
     # --- scoring ----------------------------------------------------------------
     print("\n[3/7] Scoring")
     batter_scores = score_batter_props(matchups, rolling, season, window=args.window,
@@ -162,6 +178,10 @@ def main() -> int:
             opp_k=opposing_lineup_k(lineups, rolling, window=args.window),
             lineup_hand=lineup_handedness(lineups, bats),
             pitcher_hand=pitcher_hand)
+        if not vegas_k.empty:
+            pitcher_scores = pitcher_scores.merge(
+                vegas_k[["player_id", "vegas_k_line"]].drop_duplicates("player_id"),
+                on="player_id", how="left")
         print(f"  ok    strikeouts: {len(pitcher_scores)} starters")
     else:
         pitcher_scores = pd.DataFrame()
@@ -175,6 +195,7 @@ def main() -> int:
         print("  WARN  no park_factors.csv — all parks treated as neutral")
     team_totals, game_totals = score_game_totals(schedule, matchups, bullpen, park,
                                                  rolling, window=args.window)
+    game_totals = attach_market_edge(game_totals, vegas_totals)
     print(f"  ok    totals: {len(game_totals)} games, {len(team_totals)} team totals")
 
     # --- rationale --------------------------------------------------------------
