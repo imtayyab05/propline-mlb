@@ -196,6 +196,45 @@ def rolling_batter_days(raw: pd.DataFrame, days: int = 14, by_hand: bool = False
     return res[cols].sort_values("pa", ascending=False).reset_index(drop=True)
 
 
+def rolling_pitcher_days(raw: pd.DataFrame, days: int = 14, by_hand: bool = True,
+                         name_map: dict | None = None, as_of=None) -> pd.DataFrame:
+    """Per-pitcher aggregates over the last N calendar days.
+
+    The v2 strikeout spec asks for a 14-day rolling whiff rate specifically, to catch
+    velocity bumps and pitch-shape changes that a season figure buries. Kept separate
+    from the appearance-count windows for the same reason as the batter side: fourteen
+    days and five outings are different questions.
+    """
+    df = _day_window(_prep(raw), days, as_of)
+    if df.empty:
+        return pd.DataFrame()
+
+    splits = [("all", df)]
+    if by_hand:
+        splits += [("vsL", df[df.stand == "L"]), ("vsR", df[df.stand == "R"])]
+
+    frames = []
+    for label, part in splits:
+        if part.empty:
+            continue
+        out = (part.groupby("pitcher").apply(_pitcher_agg, include_groups=False)
+                   .reset_index())
+        out["window"] = f"D{days}"
+        out["split"] = label
+        frames.append(out)
+
+    if not frames:
+        return pd.DataFrame()
+
+    res = pd.concat(frames, ignore_index=True).rename(columns={"pitcher": "player_id"})
+    res["player_name"] = res["player_id"].map(name_map or {})
+    for c in ("player_id", "games", "batters_faced", "pitches", "strikeouts",
+              "walks", "hits_allowed", "home_runs_allowed"):
+        if c in res.columns:
+            res[c] = res[c].fillna(0).astype("int64")
+    return res.sort_values("batters_faced", ascending=False).reset_index(drop=True)
+
+
 def rolling_pitcher_splits(raw: pd.DataFrame, windows=(5, 10), by_hand=True,
                            name_map: dict | None = None) -> pd.DataFrame:
     """Per-pitcher aggregates over their last N appearances.

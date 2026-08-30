@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .mlb import effective_bat_side
+
 # A hitter above this ground-ball rate has his hit score docked: balls on the ground
 # turn into outs and double plays rather than multi-hit games. The client's spec asks
 # for "10 to 15 points"; the midpoint is used, scaled by how far above the line he is
@@ -332,6 +334,79 @@ def context_multiplier(values: pd.Series) -> pd.Series:
     """
     pct = values.rank(pct=True).fillna(0.5)
     return (CONTEXT_MIN + pct * (CONTEXT_MAX - CONTEXT_MIN)).round(3)
+
+
+# The client's WHIP bands for strikeout props. His reasoning: a pitcher who allows
+# traffic runs up his pitch count and gets pulled early, so high WHIP costs outs even
+# though it can briefly inflate strikeouts per inning.
+WHIP_EFFICIENT_LO, WHIP_EFFICIENT_HI = 1.00, 1.25
+WHIP_PENALTY_ABOVE = 1.40
+
+# Leash risk. A starter who is not going five innings cannot reach a strikeout number
+# regardless of his rate stats, so the deduction is applied to the score rather than
+# folded into a weight.
+SHORT_LEASH_PITCHES = 80
+LEASH_PENALTY_MAX = 20.0
+
+
+def opposing_lineup_k(lineups: pd.DataFrame, batter_rolling: pd.DataFrame,
+                      window: str = "L10") -> pd.DataFrame:
+    """Aggregate strikeout tendency of each team's actual starting nine.
+
+    v1 averaged whatever hitters happened to have recent data. This uses the confirmed
+    or projected 1-9 only, so a lineup full of contact hitters reads differently from
+    one stacked with three-true-outcome bats — which is the client's "vacuum fallacy":
+    a pitcher's strikeout ceiling is set as much by who is standing in the box as by
+    his own stuff.
+    """
+    r = batter_rolling[(batter_rolling.window == window)
+                       & (batter_rolling.split == "all")][["player_id", "k_pct", "pa"]]
+    lu = lineups[lineups.get("status", "") != "scratched"]
+    lu = lu[lu["batting_order"].between(1, 9)]
+
+    merged = lu[["team_id", "player_id"]].merge(r, on="player_id", how="left")
+    if merged.empty:
+        return pd.DataFrame()
+
+    # Weighted by plate appearances: a hitter with 40 recent PA describes the lineup
+    # better than one with four.
+    def _agg(g):
+        d = g.dropna(subset=["k_pct"])
+        if d.empty:
+            return pd.Series({"opp_lineup_k_pct": None, "lineup_k_coverage": 0.0})
+        w = d["pa"].fillna(1).clip(lower=1)
+        return pd.Series({
+            "opp_lineup_k_pct": round(float((d["k_pct"] * w).sum() / w.sum()), 1),
+            "lineup_k_coverage": round(len(d) / len(g), 2),
+        })
+
+    out = merged.groupby("team_id").apply(_agg, include_groups=False).reset_index()
+    return out.rename(columns={"team_id": "opp_team_id"})
+
+
+def lineup_handedness(lineups: pd.DataFrame, bats: dict[int, str],
+                      pitcher_throws: str | None = None) -> pd.DataFrame:
+    """What share of each team's starting nine bats left and right.
+
+    Feeds the split-K matchup: a pitcher with a large platoon split facing a lineup
+    stacked against him is a different proposition from the same pitcher facing one
+    stacked in his favour, and a season-long K% cannot express that.
+    """
+    lu = lineups[lineups.get("status", "") != "scratched"]
+    lu = lu[lu["batting_order"].between(1, 9)]
+
+    rows = []
+    for team_id, team in lu.groupby("team_id"):
+        sides = [effective_bat_side(bats.get(int(p)), pitcher_throws)
+                 for p in team["player_id"]]
+        sides = [s for s in sides if s in ("L", "R")]
+        if not sides:
+            continue
+        n = len(sides)
+        rows.append({"opp_team_id": team_id,
+                     "lineup_share_L": round(sides.count("L") / n, 2),
+                     "lineup_share_R": round(sides.count("R") / n, 2)})
+    return pd.DataFrame(rows)
 
 
 def gb_penalty(ground_ball_rate: pd.Series) -> pd.Series:

@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
 from propline.profiles import (batter_profiles, lineup_context,  # noqa: E402
+                               lineup_handedness, opposing_lineup_k,
                                hr_matchup_matrix, pitcher_pitch_mix,
                                pitcher_profiles)
 from propline.publish import publish_slate  # noqa: E402
@@ -31,7 +32,8 @@ from propline.rationale import (TOTALS_SYSTEM, add_rationales,
 from propline.mlb import (effective_bat_side, get_player_details,  # noqa: E402
                           get_player_names)
 from propline.output import build_picks_workbook  # noqa: E402
-from propline.rolling import read_raw, rolling_pitcher_splits  # noqa: E402
+from propline.rolling import (read_raw, rolling_pitcher_days,  # noqa: E402
+                              rolling_pitcher_splits)
 from propline.scoring import (score_batter_props, score_game_totals,
                               score_pitcher_strikeouts)  # noqa: E402
 
@@ -112,9 +114,11 @@ def main() -> int:
         raw = read_raw(raw_files[0])
         names = get_player_names(raw.pitcher.dropna().unique())
         pitcher_rolling = rolling_pitcher_splits(raw, windows=(5, 10), name_map=names)
+        pitcher_days = rolling_pitcher_days(raw, days=14, name_map=names)
         print(f"  ok    {pitcher_rolling.player_id.nunique()} pitchers")
     else:
         pitcher_rolling = pd.DataFrame()
+        pitcher_days = pd.DataFrame()
         print("  WARN  no raw pitch data — strikeout props will be skipped")
 
 
@@ -151,8 +155,13 @@ def main() -> int:
           f"{batter_scores.prop.nunique()} categories")
 
     if not pitcher_rolling.empty:
-        pitcher_scores = score_pitcher_strikeouts(schedule, pitcher_rolling, lineups,
-                                                  rolling, window=args.window)
+        bats = {i: d["bats"] for i, d in details.items() if d.get("bats")}
+        pitcher_scores = score_pitcher_strikeouts(
+            schedule, pitcher_rolling, lineups, rolling, window=args.window,
+            pitcher_days=pitcher_days, pitchers=pitchers,
+            opp_k=opposing_lineup_k(lineups, rolling, window=args.window),
+            lineup_hand=lineup_handedness(lineups, bats),
+            pitcher_hand=pitcher_hand)
         print(f"  ok    strikeouts: {len(pitcher_scores)} starters")
     else:
         pitcher_scores = pd.DataFrame()

@@ -106,12 +106,16 @@ WEIGHTS = {
         "park_runs": 0.15,
     },
     # pitcher side
+    # v2 strikeouts, to the client's spec. His diagnosis was the "vacuum fallacy":
+    # v1 judged a pitcher on his own numbers and treated every opposing lineup as
+    # league average, so control arms facing swing-happy lineups were underrated
+    # (his examples: Logan Webb and Shane Bieber, both graded low and both delivering)
+    # while raw stuff was overrated against contact lineups.
     "strikeouts": {
-        "recent_k_per_game": 0.30,
-        "recent_k_pct": 0.25,
-        "recent_whiff_pct": 0.20,
-        "opp_lineup_k_pct": 0.15,    # facing a strikeout-prone lineup
-        "recent_pitches_per_game": 0.10,
+        "split_k_matchup": 0.35,      # his K% by hand, weighted by TODAY's lineup
+        "whiff_14day": 0.25,          # current stuff, not a season average
+        "opp_lineup_k_pct": 0.25,     # who is actually standing in the box
+        "whip_efficiency": 0.15,      # traffic means pitch count means an early hook
     },
 }
 
@@ -131,6 +135,17 @@ TB_STRICT_THRESHOLD = 90.0
 # good the hitter looks on paper, a pitcher who does not allow barrels is a hard
 # ceiling on the outcome the bet needs.
 HR_SUPPRESSION_CAP = 78.0
+
+# WHIP bands, from the client's spec. Below the upper bound a starter is efficient
+# enough to work deep; above WHIP_PENALTY_ABOVE the pitch count climbs and the hook
+# comes early, which costs outs regardless of strikeout rate.
+WHIP_EFFICIENT_HI = 1.25
+WHIP_PENALTY_ABOVE = 1.40
+
+# Leash risk, applied as a deduction rather than a weight: a starter who will not see
+# the fifth inning cannot reach a strikeout number however good his rates are.
+SHORT_LEASH_PITCHES = 80
+LEASH_PENALTY_MAX = 20.0
 
 # How much a lineup slot is worth for each prop family (index 0 = leadoff)
 SPOT_PA = [1.00, 0.97, 0.94, 0.90, 0.86, 0.82, 0.78, 0.74, 0.70]   # plate appearances
@@ -342,11 +357,47 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
     return res.sort_values(["prop", "score"], ascending=[True, False]).reset_index(drop=True)
 
 
+def _whip_efficiency(whip: pd.Series) -> pd.Series:
+    """Turn WHIP into a 0-1 efficiency score for strikeout purposes.
+
+    The client's reasoning: traffic on base runs up the pitch count, and a starter at
+    95 pitches in the fifth gets pulled before he can accumulate strikeouts. So being
+    efficient helps here, even though a high WHIP briefly inflates strikeouts per
+    inning. Flat at the top — no extra credit for a 0.90 WHIP over a 1.20 — then
+    falling away above his threshold.
+    """
+    w = pd.to_numeric(whip, errors="coerce")
+    eff = 1.0 - ((w - WHIP_EFFICIENT_HI) / 0.5)   # 1.25 -> 1.0, ~1.75 -> 0
+    return eff.clip(lower=0.0, upper=1.0).fillna(0.5)
+
+
+def _leash_penalty(pitches_per_game: pd.Series) -> pd.Series:
+    """Points deducted for a starter who will not be out there long enough.
+
+    Scaled rather than a cliff: 79 pitches an outing is not the same risk as 55.
+    """
+    p = pd.to_numeric(pitches_per_game, errors="coerce")
+    short = (SHORT_LEASH_PITCHES - p).clip(lower=0)
+    return (short / SHORT_LEASH_PITCHES * LEASH_PENALTY_MAX).clip(
+        upper=LEASH_PENALTY_MAX).fillna(0)
+
+
 def score_pitcher_strikeouts(schedule: pd.DataFrame, pitcher_rolling: pd.DataFrame,
                              lineups: pd.DataFrame, batter_rolling: pd.DataFrame,
-                             window: str = "L10") -> pd.DataFrame:
-    """Score strikeout props for today's probable starters."""
+                             window: str = "L10",
+                             pitcher_days: pd.DataFrame | None = None,
+                             pitchers: pd.DataFrame | None = None,
+                             opp_k: pd.DataFrame | None = None,
+                             lineup_hand: pd.DataFrame | None = None,
+                             pitcher_hand: dict[int, str] | None = None) -> pd.DataFrame:
+    """Score strikeout props for today's probable starters.
 
+    v2 rebuilds this around the client's "vacuum fallacy" point: v1 judged a pitcher on
+    his own rate stats and implicitly treated every opposing lineup as league average.
+    That underrated control arms facing swing-happy lineups — his examples were Logan
+    Webb and Shane Bieber, both graded low and both delivering — and overrated raw stuff
+    against contact lineups.
+    """
     starters = []
     for _, g in schedule.iterrows():
         for side, opp in (("home", "away"), ("away", "home")):
@@ -363,37 +414,85 @@ def score_pitcher_strikeouts(schedule: pd.DataFrame, pitcher_rolling: pd.DataFra
     if df.empty:
         return df
 
+    if pitcher_hand:
+        df["throws"] = df["player_id"].map(pitcher_hand)
+
+    # --- the pitcher's own recent form ------------------------------------------
     p = pitcher_rolling[(pitcher_rolling.window == window)
-                        & (pitcher_rolling.split == "all")].copy()
+                        & (pitcher_rolling.split == "all")]
     df = df.merge(p[["player_id", "games", "k_per_game", "k_pct", "whiff_pct",
                      "pitches_per_game", "batters_faced"]].rename(columns={
         "games": "recent_games", "k_per_game": "recent_k_per_game",
         "k_pct": "recent_k_pct", "whiff_pct": "recent_whiff_pct",
         "pitches_per_game": "recent_pitches_per_game"}), on="player_id", how="left")
 
-    # how strikeout-prone is the lineup he faces?
-    b = batter_rolling[(batter_rolling.window == window)
-                       & (batter_rolling.split == "all")][["player_id", "k_pct"]]
-    opp_k = (lineups.merge(b, on="player_id", how="left")
-                    .groupby("team_id")["k_pct"].mean()
-                    .rename("opp_lineup_k_pct").reset_index())
-    df = df.merge(opp_k, left_on="opp_team_id", right_on="team_id",
-                  how="left", suffixes=("", "_drop"))
-    df = df.drop(columns=[c for c in df.columns if c.endswith("_drop")])
+    # --- his K% by batter hand, weighted by the lineup he actually faces ---------
+    for side in ("L", "R"):
+        part = pitcher_rolling[(pitcher_rolling.window == window)
+                               & (pitcher_rolling.split == f"vs{side}")]
+        if part.empty:
+            continue
+        df = df.merge(part[["player_id", "k_pct"]].rename(
+            columns={"k_pct": f"k_pct_vs{side}"}), on="player_id", how="left")
 
-    weights = WEIGHTS["strikeouts"]
-    score = pd.Series(0.0, index=df.index)
-    for col, w in weights.items():
-        if col in df.columns:
-            score += _pct(df[col]) * w
-    total_w = sum(abs(w) for c, w in weights.items() if c in df.columns)
+    if lineup_hand is not None and not lineup_hand.empty:
+        df = df.merge(lineup_hand, on="opp_team_id", how="left")
+
+    if {"k_pct_vsL", "k_pct_vsR", "lineup_share_L", "lineup_share_R"} <= set(df.columns):
+        # A platoon-heavy arm facing a lineup stacked against him is a different bet
+        # from the same arm facing one stacked in his favour, and a single season K%
+        # cannot say so.
+        df["split_k_matchup"] = (
+            df["k_pct_vsL"].fillna(df["recent_k_pct"]) * df["lineup_share_L"].fillna(0.5)
+            + df["k_pct_vsR"].fillna(df["recent_k_pct"]) * df["lineup_share_R"].fillna(0.5)
+        ).round(1)
+
+    # --- 14-day whiff, per the spec ---------------------------------------------
+    if pitcher_days is not None and not pitcher_days.empty:
+        d = pitcher_days[pitcher_days.split == "all"]
+        df = df.merge(d[["player_id", "whiff_pct"]].rename(
+            columns={"whiff_pct": "whiff_14day"}), on="player_id", how="left")
+    if "whiff_14day" not in df.columns:
+        df["whiff_14day"] = df.get("recent_whiff_pct")
+
+    # --- WHIP and the opposing lineup -------------------------------------------
+    if pitchers is not None and not pitchers.empty:
+        df = df.merge(pitchers[["player_id", "whip"]].rename(
+            columns={"whip": "pitcher_whip"}), on="player_id", how="left")
+        df["whip_efficiency"] = _whip_efficiency(df["pitcher_whip"])
+
+    if opp_k is not None and not opp_k.empty:
+        df = df.merge(opp_k, on="opp_team_id", how="left")
+    else:
+        b = batter_rolling[(batter_rolling.window == window)
+                           & (batter_rolling.split == "all")][["player_id", "k_pct"]]
+        agg = (lineups.merge(b, on="player_id", how="left")
+                      .groupby("team_id")["k_pct"].mean()
+                      .rename("opp_lineup_k_pct").reset_index()
+                      .rename(columns={"team_id": "opp_team_id"}))
+        df = df.merge(agg, on="opp_team_id", how="left")
+
+    # --- score -------------------------------------------------------------------
+    df["score"] = _weighted_score(df, WEIGHTS["strikeouts"])
+
+    # Leash risk is a deduction, not a weight: no strikeout rate survives being pulled
+    # in the fourth inning.
+    if "recent_pitches_per_game" in df.columns:
+        df["leash_penalty"] = _leash_penalty(df["recent_pitches_per_game"]).round(1)
+        df["expected_pitch_limit"] = pd.to_numeric(
+            df["recent_pitches_per_game"], errors="coerce").round(0)
+        df["score"] = (df["score"] - df["leash_penalty"]).clip(lower=0).round(1)
+
+    # A letter for the handedness matchup, so a slate can be scanned rather than read.
+    if "split_k_matchup" in df.columns:
+        q = _pct(df["split_k_matchup"])
+        df["split_k_rate_matchup"] = pd.cut(
+            q, [-0.01, 0.2, 0.4, 0.6, 0.8, 1.01],
+            labels=["D", "C", "B", "A", "A+"]).astype("object")
 
     df["prop"] = "strikeouts"
-    df["score"] = (100 * score / total_w).round(1) if total_w else 0.0
     df["rank"] = df["score"].rank(ascending=False, method="min").astype(int)
     return df.sort_values("score", ascending=False).reset_index(drop=True)
-
-
 def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
                       bullpen: pd.DataFrame, park_factors: pd.DataFrame,
                       rolling: pd.DataFrame, window: str = "L10") -> tuple[pd.DataFrame, pd.DataFrame]:
