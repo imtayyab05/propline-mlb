@@ -152,10 +152,14 @@ def pitcher_profiles(pitcher_stats: pd.DataFrame,
 
     hits = _num(df, "hit")
     walks = _num(df, "walk")
+    strikeouts = _num(df, "strikeout")
     out = pd.DataFrame({
         "player_id": df["player_id"],
         "innings": ip,
         "whip": ((hits + walks) / ip.replace(0, pd.NA)).round(3),
+        # K/9 pairs with WHIP to flag a pitching duel: a starter who neither allows
+        # baserunners nor lets balls in play is the profile that traps a high total.
+        "k_per_9": (9 * strikeouts / ip.replace(0, pd.NA)).round(2),
     })
     out = out.dropna(subset=["player_id"])
 
@@ -425,3 +429,67 @@ def gb_penalty(ground_ball_rate: pd.Series) -> pd.Series:
     """
     over = (pd.to_numeric(ground_ball_rate, errors="coerce") - GB_PENALTY_THRESHOLD)
     return (over.clip(lower=0) / 15.0 * GB_PENALTY_MAX).clip(upper=GB_PENALTY_MAX).fillna(0)
+
+
+# --- bullpen workload ----------------------------------------------------------
+#
+# Thresholds measured, not guessed. Across a full 30-team slate the three-day relief
+# pitch count ran: min 98, lower quartile ~175, median ~210, upper quartile ~257,
+# max 352. The cut points below sit on those quartiles, so "Overworked" means roughly
+# the bottom quarter of rested pens on a normal day rather than an arbitrary number.
+#
+# Absolute rather than percentile-ranked on purpose: the score component IS ranked
+# across the slate like everything else in this engine, but the LABEL has to mean the
+# same thing every day. If it were ranked, some pen would be branded "Overworked"
+# every single night even on a slate where every unit was fresh.
+PEN_RESTED_MAX_PITCHES = 175
+PEN_TIRED_MIN_PITCHES = 257
+
+# Innings are the second half of the client's spec. A pen can be low on innings but
+# high on pitches (traffic, deep counts), which is the more fatigued state, so the
+# workload index leans on pitches and uses innings as support.
+PEN_PITCH_WEIGHT = 0.65
+PEN_INNINGS_WEIGHT = 0.35
+PEN_REFERENCE_PITCHES = 210.0   # measured slate median
+PEN_REFERENCE_INNINGS = 12.2    # measured slate median
+
+
+def bullpen_workload(bullpen: pd.DataFrame) -> pd.DataFrame:
+    """Roll per-reliever usage up to a team-level fatigue picture.
+
+    Returns one row per team: three-day pitches and innings for the relief unit, how
+    many arms are likely unavailable, a normalised workload index, and the categorical
+    status the client asked to see on the board.
+    """
+    if bullpen is None or bullpen.empty:
+        return pd.DataFrame(columns=["team_id", "pen_pitches_3d", "pen_innings_3d",
+                                     "pen_relievers", "pen_unavailable",
+                                     "pen_workload", "pen_status"])
+
+    bp = bullpen.copy()
+    for col in ("pitches", "innings"):
+        if col not in bp.columns:
+            bp[col] = 0
+        bp[col] = pd.to_numeric(bp[col], errors="coerce").fillna(0)
+
+    bp["_out"] = bp.get("availability", pd.Series("", index=bp.index)).eq("likely_unavailable")
+
+    pen = (bp.groupby(["team_id"], as_index=False)
+             .agg(pen_pitches_3d=("pitches", "sum"),
+                  pen_innings_3d=("innings", "sum"),
+                  pen_relievers=("player_id", "count"),
+                  pen_unavailable=("_out", "sum")))
+    pen["pen_innings_3d"] = pen["pen_innings_3d"].round(1)
+
+    # Normalised against the measured median so 1.0 is a typical workload. Bounded,
+    # because one 350-pitch outlier should not stretch the whole slate's scale.
+    idx = (PEN_PITCH_WEIGHT * pen["pen_pitches_3d"] / PEN_REFERENCE_PITCHES
+           + PEN_INNINGS_WEIGHT * pen["pen_innings_3d"] / PEN_REFERENCE_INNINGS)
+    pen["pen_workload"] = idx.clip(0, 2).round(3)
+
+    pen["pen_status"] = pd.cut(
+        pen["pen_pitches_3d"],
+        bins=[-1, PEN_RESTED_MAX_PITCHES, PEN_TIRED_MIN_PITCHES, float("inf")],
+        labels=["Rested", "Average", "Overworked"]).astype(str)
+
+    return pen

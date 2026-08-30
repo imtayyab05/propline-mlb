@@ -106,10 +106,15 @@ PITCHER_COLS = [
 TEAM_TOTAL_COLS = [
     ("rank", "#"), ("team", "Team"), ("opponent", "Opponent"),
     ("opp_starter", "Opposing SP"), ("score", "Score"),
+    ("starter_whip_k9", "Opp SP WHIP / K9"),
     ("lineup_matchup_woba", "Lineup vs SP xwOBA"),
     ("opp_starter_weak", "SP xwOBA Allowed"),
-    ("opp_bullpen_tired", "Opp Pen Tired"),
-    ("park_runs", "Park Runs"), ("venue", "Venue"), ("rationale", "Why"),
+    ("opp_pen_status", "Opp Pen Status"),
+    ("opp_pen_pitches_3d", "Opp Pen Pitches (3d)"),
+    ("opp_pen_innings_3d", "Opp Pen IP (3d)"),
+    ("park_runs", "Park Runs"),
+    ("temp_f", "Temp F"), ("wind", "Wind"), ("weather_mult", "Weather Mult"),
+    ("venue", "Venue"), ("rationale", "Why"),
 ]
 
 GAME_TOTAL_COLS = [
@@ -120,7 +125,35 @@ GAME_TOTAL_COLS = [
     ("park_runs", "Park Runs"), ("park_matched", "Park Data"),
     ("combined_offense", "Combined Offense"),
     ("combined_starter_weak", "Combined SP Weakness"),
-    ("combined_bullpen_tired", "Combined Pen Tired"), ("rationale", "Why"),
+    ("starter_whip_k9", "Starters WHIP / K9"),
+    ("combined_starter_k9", "Avg SP K/9"),
+    ("starters_resolved", "SP Data"),
+    ("pen_status_home", "Home Pen"), ("pen_status_away", "Away Pen"),
+    ("combined_pen_workload", "Combined Pen Workload"),
+    ("temp_f", "Temp F"), ("wind", "Wind"), ("weather_mult", "Weather Mult"),
+    ("rationale", "Why"),
+]
+
+# Arsenal tabs. The hand-split columns come from the raw pitch window (about three
+# weeks), not the season — Savant cannot split a pitcher's arsenal by batter side at
+# all — so they are labelled to say so rather than passing as season numbers.
+PITCHER_ARSENAL_COLS = [
+    ("pitcher", "Pitcher"), ("throws", "T"), ("team", "Team"),
+    ("opponent", "Opponent"), ("side", "Split"), ("pitch_rank", "#"),
+    ("pitch_name", "Pitch"), ("usage_pct", "Usage %"), ("avg_speed", "Velo"),
+    ("pitches", "Sample"), ("whiff_pct", "Whiff % (recent)"),
+    ("xwoba_allowed", "xwOBA Allowed (recent)"),
+    ("run_value_per_100", "RV/100 (season)"),
+    ("rates_reliable", "Rates Reliable"),
+]
+
+BATTER_ARSENAL_COLS = [
+    ("player_name", "Batter"), ("bats", "B"), ("stands", "Stands"),
+    ("team", "Team"), ("batting_order", "Spot"), ("opp_starter", "Opposing SP"),
+    ("pitch_name", "Pitch"), ("sp_usage_pct", "SP Usage %"),
+    ("pa", "PA"), ("est_woba", "xwOBA"), ("est_slg", "xSLG"),
+    ("whiff_percent", "Whiff %"), ("run_value_per_100", "RV/100"),
+    ("status", "Lineup"),
 ]
 
 SHEET_TITLES = {
@@ -152,7 +185,9 @@ def _shape(df: pd.DataFrame, spec, top_n=None) -> pd.DataFrame:
 def build_picks_workbook(batter_scores: pd.DataFrame, pitcher_scores: pd.DataFrame,
                          out_path, run_meta: dict, top_n: int = 40,
                          team_totals: pd.DataFrame | None = None,
-                         game_totals: pd.DataFrame | None = None) -> Path:
+                         game_totals: pd.DataFrame | None = None,
+                         pitcher_arsenal: pd.DataFrame | None = None,
+                         batter_arsenal: pd.DataFrame | None = None) -> Path:
     """Write the finished picks workbook. Returns the path."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,6 +214,16 @@ def build_picks_workbook(batter_scores: pd.DataFrame, pitcher_scores: pd.DataFra
             if frame is not None and not frame.empty:
                 shaped = _shape(frame.sort_values("score", ascending=False), spec)
                 shaped.to_excel(xl, sheet_name=title, index=False)
+
+        # Arsenal reference tabs. Slate-wide reference rather than a ranked board, so
+        # never truncated to top_n — cutting these to 40 rows would drop most of the
+        # lineup the client wants to look up.
+        for frame, spec, title in ((pitcher_arsenal, PITCHER_ARSENAL_COLS,
+                                    "Pitcher Arsenals"),
+                                   (batter_arsenal, BATTER_ARSENAL_COLS,
+                                    "Batter Arsenals")):
+            if frame is not None and not frame.empty:
+                _shape(frame, spec).to_excel(xl, sheet_name=title, index=False)
 
         # auto-size columns so nothing is cut off on open
         for ws in xl.book.worksheets:

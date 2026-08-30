@@ -21,10 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from propline.db import load_env, log_run  # noqa: E402
 from propline.matchup import build_matchups  # noqa: E402
-from propline.profiles import (batter_profiles, lineup_context,  # noqa: E402
+from propline.profiles import (batter_profiles, bullpen_workload,  # noqa: E402
+                               lineup_context,
                                lineup_handedness, opposing_lineup_k,
                                hr_matchup_matrix, pitcher_pitch_mix,
                                pitcher_profiles)
+from propline.weather import fetch_weather  # noqa: E402
+from propline.arsenal import (attach_arsenal,  # noqa: E402
+                              batter_arsenal_table, pitcher_arsenal_table)
 from propline.odds import (attach_game_totals, attach_strikeout_lines,  # noqa: E402
                           fetch_slate_odds, game_totals as odds_game_totals,
                           strikeout_lines)
@@ -193,8 +197,23 @@ def main() -> int:
     park = pd.read_csv(pf_path) if pf_path.exists() else pd.DataFrame(columns=["venue_name"])
     if not pf_path.exists():
         print("  WARN  no park_factors.csv — all parks treated as neutral")
+    pen_workload = bullpen_workload(bullpen)
+    if not pen_workload.empty:
+        counts = pen_workload["pen_status"].value_counts().to_dict()
+        print(f"  ok    bullpen workload: {len(pen_workload)} teams "
+              f"({', '.join(f'{v} {k}' for k, v in counts.items())})")
+
+    # Weather is free and unmetered, but it must never be able to sink a slate.
+    weather = pd.DataFrame()
+    try:
+        weather = fetch_weather(schedule, raw_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  WARN  no weather this run ({exc}) — totals scored without it")
+
     team_totals, game_totals = score_game_totals(schedule, matchups, bullpen, park,
-                                                 rolling, window=args.window)
+                                                 rolling, window=args.window,
+                                                 pen_workload=pen_workload,
+                                                 pitchers=pitchers, weather=weather)
     game_totals = attach_market_edge(game_totals, vegas_totals)
     print(f"  ok    totals: {len(game_totals)} games, {len(team_totals)} team totals")
 
@@ -216,25 +235,28 @@ def main() -> int:
         # Team/game indexes are banded into words BEFORE the model sees them. Simply
         # instructing it not to quote the raw values did not work — it wrote
         # "combined offense of 0.674", which means nothing to a reader.
+        # Bullpen condition needs no banding in v2 — pen_status is already the plain
+        # English the model should use (Rested / Average / Overworked), so it is passed
+        # straight through rather than re-derived from an index.
         game_totals = label_internal_indexes(game_totals, {
             "combined_offense": ("quiet", "average", "strong"),
-            "combined_bullpen_tired": ("rested", "moderately worked", "short-handed"),
+            "combined_starter_k9": ("contact-friendly", "average", "strikeout-heavy"),
         })
         game_totals = add_rationales(
             game_totals, ["teams", "venue", "park_runs", "combined_offense_desc",
-                          "combined_bullpen_tired_desc"], "game_total", top_n=args.explain_top,
-            system=TOTALS_SYSTEM)
+                          "pen_summary",
+                          "combined_starter_k9_desc", "temp_f", "wind"],
+            "game_total", top_n=args.explain_top, system=TOTALS_SYSTEM)
 
         team_totals = label_internal_indexes(team_totals, {
             "lineup_matchup_woba": ("unfavourable", "even", "favourable"),
-            "opp_bullpen_tired": ("rested", "moderately worked", "short-handed"),
             "opp_starter_weak": ("tough", "average", "hittable"),
         })
         team_totals = add_rationales(
             team_totals, ["team", "opponent", "opp_starter", "park_runs",
-                          "lineup_matchup_woba_desc", "opp_bullpen_tired_desc",
-                          "opp_starter_weak_desc"], "team_total", top_n=args.explain_top,
-            system=TOTALS_SYSTEM)
+                          "lineup_matchup_woba_desc", "opp_pen_status",
+                          "opp_starter_weak_desc", "temp_f", "wind"],
+            "team_total", top_n=args.explain_top, system=TOTALS_SYSTEM)
         done = int(batter_scores.rationale.notna().sum())
         print(f"  ok    {done} batter picks explained")
     else:
@@ -252,10 +274,31 @@ def main() -> int:
         "Picks per category": args.top,
         "Note": "Projected lineups are an early read; confirmed lineups post 2-4h before first pitch.",
     }
+    # Arsenal reference tabs. Both need the raw pitch data: the vs-LHB/vs-RHB split
+    # exists nowhere else, so without raw these tabs are simply absent rather than
+    # silently wrong.
+    pitcher_ars, batter_ars = pd.DataFrame(), pd.DataFrame()
+    if raw_files:
+        pitcher_ars = pitcher_arsenal_table(
+            schedule, raw,
+            arsenals=(pd.read_csv(raw_dir / "pitcher_pitch_arsenals.csv")
+                      if (raw_dir / "pitcher_pitch_arsenals.csv").exists() else None),
+            arsenal_stats=pa, pitcher_hand=pitcher_hand)
+        batter_ars = batter_arsenal_table(matchups, ba, mix)
+        # The starter's top 3 by side also rides along on the strikeout board, so the
+        # dashboard can show it without a table of its own.
+        pitcher_scores = attach_arsenal(pitcher_scores, pitcher_ars)
+        print(f"  ok    arsenals: {pitcher_ars.player_id.nunique()} starters, "
+              f"{batter_ars.player_id.nunique()} hitters")
+    else:
+        print("  WARN  no raw pitch data — arsenal tabs skipped")
+
     out = build_picks_workbook(batter_scores, pitcher_scores,
                                Path("data/picks") / f"props_{day}.xlsx",
                                meta, top_n=args.top,
-                               team_totals=team_totals, game_totals=game_totals)
+                               team_totals=team_totals, game_totals=game_totals,
+                               pitcher_arsenal=pitcher_ars,
+                               batter_arsenal=batter_ars)
     print(f"  ok    {out}")
 
     # --- publish ----------------------------------------------------------------

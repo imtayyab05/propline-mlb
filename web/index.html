@@ -270,6 +270,49 @@
   .toast.show{opacity:1;transform:translate(-50%,0)}
   .hidden{display:none}
   .thin{color:var(--warn)}
+  /* Bullpen fatigue reads at a glance: a worked pen is the thing most likely to
+     turn a quiet total into a loud one late. */
+  .pen-rested{color:var(--good)}
+  .pen-average{color:var(--muted)}
+  .pen-overworked{color:var(--bad);font-weight:600}
+  /* Expandable pitch arsenal on the Strikeouts board. */
+  .ars-toggle{cursor:pointer;user-select:none}
+  .ars-toggle .caret{display:inline-block;width:1em;color:var(--muted);
+    transition:transform .18s ease}
+  .ars-toggle.open .caret{transform:rotate(90deg)}
+  .ars-row>td{padding:0 0 14px 0;background:rgba(255,255,255,.02)}
+  /* Grid, not flex. A flex item is sized by its content, so the inner width:100%
+     table resolved against an indefinite width and overflowed into the panel beside
+     it. Grid tracks have definite widths, so the fixed-layout table lands exactly in
+     its track; auto-fit collapses to one column on a narrow screen. */
+  .ars-wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+    gap:26px;padding:12px 18px 4px}
+  /* min-width:0 overrides a grid item's auto minimum, so the table is governed by the
+     track rather than by its own content. */
+  .ars-side{min-width:0}
+  .ars-side h4{margin:0 0 6px;font-size:.72rem;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--muted)}
+  /* table-layout:fixed is required, not cosmetic: an auto-layout table cannot shrink
+     below its content, so inside a 300px flex item it overflows into the panel beside
+     it and the two sides render on top of each other. */
+  .ars-side table{width:100%;border-collapse:collapse;font-size:.8rem;
+    table-layout:fixed;
+    /* Overrides the global `table{min-width:760px}` on line ~239, which exists to make
+       the main board scroll horizontally. Inherited here it pinned each nested table
+       to 760px inside a 494px grid track, so the two sides rendered on top of each
+       other. Measured, not guessed: computed width was 760px against a 494px track. */
+    min-width:0}
+  /* Fixed layout splits columns evenly, which truncated "4-Seam Fastball" at a width
+     that had room for it. Give the name a third and let the four numbers share the
+     rest; the ellipsis stays as the backstop for a genuinely long pitch name. */
+  .ars-side th:first-child,.ars-side td:first-child{width:34%}
+  .ars-side td:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ars-side td,.ars-side th{padding:3px 8px 3px 0;text-align:left;
+    border-bottom:1px solid rgba(255,255,255,.05)}
+  .ars-side th{color:var(--muted);font-weight:500}
+  .ars-side .n{text-align:right;font-variant-numeric:tabular-nums}
+  .ars-thin{color:var(--muted)}
+  .ars-note{padding:2px 18px 0;font-size:.72rem;color:var(--muted)}
 
   footer{padding:34px 24px;border-top:1px solid var(--line);color:var(--dim);
          font-size:13px;display:flex;gap:14px;flex-wrap:wrap;
@@ -755,8 +798,24 @@ let showAll = false;
 const pct1 = v => v == null ? '' : `${(+v).toFixed(1)}%`;
 const num3 = v => v == null ? '' : (+v).toFixed(3);
 const yesNo = v => v === true ? 'yes' : v === false ? '' : (v ?? '');
+const tempF = v => v == null ? '' : `${Math.round(+v)}°F`;
 
 const EXTRA_COLS = {
+  // Totals boards. v2 adds the bullpen-fatigue and weather signals the client asked
+  // for, so a worked pen or a pitching duel is visible without opening the workbook.
+  game_total: [
+    ['Home Pen', 'pen_status_home'],
+    ['Away Pen', 'pen_status_away'],
+    ['Starters WHIP / K9', 'starter_whip_k9'],
+    ['Temp', 'temp_f', tempF],
+    ['Wind', 'wind'],
+  ],
+  team_total: [
+    ['Opp Pen', 'opp_pen_status'],
+    ['Opp SP WHIP / K9', 'starter_whip_k9'],
+    ['Temp', 'temp_f', tempF],
+    ['Wind', 'wind'],
+  ],
   hits: [
     ['Recent xwOBA', 'recent_xwoba', num3],
     ['Contact% (14d)', 'contact_rate_recent', pct1],
@@ -814,6 +873,29 @@ function cellValue(row, key, fmt){
   return fmt ? fmt(v) : v;
 }
 
+// The starter's top 3 pitches to each side, shipped inside the pick's details JSON
+// rather than a table of its own. Rates come from the ~3-week raw window, so a thin
+// sample is shown greyed with a dash instead of a number it cannot support.
+function arsenalPanel(arsenal, cols){
+  const side = label => {
+    const rows = arsenal.filter(a => a.side === label);
+    if (!rows.length) return '';
+    return `<div class="ars-side"><h4>${esc(label)}</h4><table>
+      <tr><th>Pitch</th><th class="n">Usage</th><th class="n">Velo</th>
+          <th class="n">Whiff</th><th class="n">xwOBA</th></tr>
+      ${rows.map(a=>`<tr class="${a.ok?'':'ars-thin'}">
+        <td>${esc(a.pitch||'')}</td>
+        <td class="n">${a.usage!=null?a.usage.toFixed(1)+'%':'—'}</td>
+        <td class="n">${a.velo!=null?a.velo.toFixed(1):'—'}</td>
+        <td class="n">${a.ok&&a.whiff!=null?a.whiff.toFixed(1)+'%':'—'}</td>
+        <td class="n">${a.ok&&a.xwoba!=null?a.xwoba.toFixed(3):'—'}</td></tr>`).join('')}
+    </table></div>`;
+  };
+  const thin = arsenal.some(a=>!a.ok);
+  return `<td colspan="${cols}"><div class="ars-wrap">${side('vs LHB')}${side('vs RHB')}</div>
+    ${thin?'<div class="ars-note">Dashes: too few pitches in the recent window to quote a rate.</div>':''}</td>`;
+}
+
 function render(){
   const prop = PROPS.find(p=>p.key===current);
   const all = filtered();
@@ -827,7 +909,8 @@ function render(){
        ${current==='strikeouts'?'':'<th>Lineup</th>'}<th>Recent</th>
        ${extra.map(c=>`<th>${esc(c[0])}</th>`).join('')}<th>Why</th></tr>`
     : `<tr><th>#</th><th>Matchup</th><th>Venue</th><th>Score</th>
-       <th>Vegas</th><th>vs Vegas</th><th>Park Runs</th><th>Why</th></tr>`;
+       <th>Vegas</th><th>vs Vegas</th><th>Park Runs</th>
+       ${extra.map(c=>`<th>${esc(c[0])}</th>`).join('')}<th>Why</th></tr>`;
 
   $('#tbody').innerHTML = data.map((r,i)=>{
     const d = r.details || {};
@@ -844,6 +927,11 @@ function render(){
         <td class="num">${esc(cellValue(r,'vegas_total'))}</td>
         <td class="num">${esc(cellValue(r,'vs_vegas'))}</td>
         <td class="num">${pf}${flag}</td>
+        ${extra.map(([, key, fmt]) => {
+          const val = cellValue(r, key, fmt);
+          const tint = key.includes('pen_status') ? ` pen-${String(val).toLowerCase()}` : '';
+          return `<td class="num${tint}">${esc(val)}</td>`;
+        }).join('')}
         <td class="why">${esc(r.rationale||'')}</td></tr>`;
     }
     const games = d.recent_games;
@@ -856,16 +944,23 @@ function render(){
         ? '<span class="badge b-scr">scratched</span>' : '';
     const cells = extra.map(([, key, fmt]) =>
       `<td class="num">${esc(cellValue(r, key, fmt))}</td>`).join('');
-    return `<tr ${st}>
+    const ars = current==='strikeouts' && Array.isArray(d.arsenal) && d.arsenal.length
+      ? d.arsenal : null;
+    // strikeouts has no Lineup column, hence 7 fixed columns rather than 8
+    const colCount = 7 + extra.length;
+    const arsRow = ars
+      ? `<tr class="ars-row hidden" data-ars-for="${i}">${arsenalPanel(ars, colCount)}</tr>`
+      : '';
+    return `<tr ${st}${ars?` class="ars-toggle" data-ars="${i}"`:''}>
       <td class="rank">${r.rank}</td>
-      <td class="name">${esc(r.subject_name)}</td>
+      <td class="name">${ars?'<span class="caret">›</span> ':''}${esc(r.subject_name)}</td>
       <td class="num">${esc(r.team||'')}</td>
       <td class="num">${esc(r.opponent||'')}</td>
       <td class="score ${scoreClass(r.score)}">${r.score}</td>
       ${current==='strikeouts'?'':`<td>${badge}</td>`}
       <td class="num ${thin?'thin':''}">${games!=null?`${games} G`:'—'}</td>
       ${cells}
-      <td class="why">${esc(r.rationale||'')}</td></tr>`;
+      <td class="why">${esc(r.rationale||'')}</td></tr>${arsRow}`;
   }).join('');
 
   $('#empty').classList.toggle('hidden', data.length > 0);
@@ -990,6 +1085,15 @@ async function init(){
   ['search','teamfilter','statusfilter'].forEach(id=>
     $('#'+id).addEventListener('input', ()=>{ showAll = false; render(); }));
   $('#more').addEventListener('click', ()=>{ showAll = true; render(); });
+  // Delegated so it survives every re-render of #tbody.
+  $('#tbody').addEventListener('click', e=>{
+    const row = e.target.closest('tr.ars-toggle');
+    if (!row) return;
+    const panel = $('#tbody').querySelector(`tr[data-ars-for="${row.dataset.ars}"]`);
+    if (!panel) return;
+    panel.classList.toggle('hidden');
+    row.classList.toggle('open');
+  });
   $('#slate').addEventListener('change', e=>{ slateDate = e.target.value; refresh(); });
   $('#refresh').addEventListener('click', refresh);
   $('#update').addEventListener('click', updateNow);

@@ -61,6 +61,8 @@ def get_schedule(game_date, session=None) -> pd.DataFrame:
                 "game_time_utc": g.get("gameDate"),
                 "status": g["status"]["detailedState"],
                 "venue": (g.get("venue") or {}).get("name"),
+                # Needed to look up coordinates and roof type for the weather pull.
+                "venue_id": (g.get("venue") or {}).get("id"),
                 "home_team": home["team"]["name"],
                 "home_team_id": home["team"]["id"],
                 "away_team": away["team"]["name"],
@@ -316,11 +318,24 @@ def get_player_names(player_ids, session=None) -> dict[int, str]:
 
 # --- bullpen -------------------------------------------------------------------
 
-def get_bullpen_usage(game_date, days=3, session=None) -> pd.DataFrame:
-    """Relief appearances in the last N days -> simple availability flag.
+def _innings_to_float(value) -> float:
+    """Baseball innings are not decimals: "1.2" means one and two THIRDS."""
+    whole, _, frac = str(value or "0").partition(".")
+    try:
+        return int(whole) + {"0": 0.0, "1": 1 / 3, "2": 2 / 3}.get(frac or "0", 0.0)
+    except ValueError:
+        return 0.0
 
-    Deliberately a usage filter, not a fatigue model (per the requirements doc).
-    A pitcher who threw yesterday or the day before is flagged likely_unavailable.
+
+def get_bullpen_usage(game_date, days=3, session=None) -> pd.DataFrame:
+    """Relief appearances in the last N days -> availability flag and workload.
+
+    v1 was deliberately a usage filter rather than a fatigue model. v2 keeps the
+    per-pitcher availability flag but also carries pitch counts AND innings, because
+    the client asked for both: pitch count measures the stress on an arm, innings
+    measure how much of the game the pen has had to cover. A unit can be low on
+    innings but high on pitches (lots of traffic in short outings), which is the
+    tireder of the two.
     """
     session = session or _session()
     as_of = datetime.strptime(str(game_date), "%Y-%m-%d").date()
@@ -344,6 +359,7 @@ def get_bullpen_usage(game_date, days=3, session=None) -> pd.DataFrame:
                     "appearance_date": g["date"],
                     "is_starter": pid in starters,
                     "pitches": st.get("numberOfPitches") or 0,
+                    "innings": _innings_to_float(st.get("inningsPitched")),
                 })
     if not rows:
         return pd.DataFrame()
@@ -353,8 +369,10 @@ def get_bullpen_usage(game_date, days=3, session=None) -> pd.DataFrame:
     agg = (relief.groupby(["team_id", "team", "player_id", "player_name"])
                  .agg(last_appearance=("appearance_date", "max"),
                       appearances=("appearance_date", "count"),
-                      pitches=("pitches", "sum"))
+                      pitches=("pitches", "sum"),
+                      innings=("innings", "sum"))
                  .reset_index())
+    agg["innings"] = agg["innings"].round(1)
 
     cutoff = (as_of - timedelta(days=2)).isoformat()
     agg["availability"] = agg["last_appearance"].apply(

@@ -23,6 +23,7 @@ import pandas as pd
 
 from .mlb import effective_bat_side
 from .profiles import context_multiplier, gb_penalty
+from .weather import wind_description
 
 # --- tunable ------------------------------------------------------------------
 
@@ -92,18 +93,26 @@ WEIGHTS = {
     },
     # team runs in a single game
     "team_total": {
-        "lineup_matchup_woba": 0.35,   # how the lineup fares vs the opposing starter
-        "opp_starter_weak": 0.25,      # what that starter gives up generally
-        "opp_bullpen_tired": 0.20,     # a depleted pen means worse innings 6-9
+        "lineup_matchup_woba": 0.32,   # how the lineup fares vs the opposing starter
+        "opp_starter_weak": 0.23,      # what that starter gives up generally
+        "opp_pen_workload": 0.20,      # a worked pen means worse innings 6-9
+        "opp_starter_whip": 0.05,      # baserunners allowed -> more scoring chances
         "park_runs": 0.10,
         "recent_team_form": 0.10,
     },
     # combined runs, both teams
+    #
+    # The negative K/9 term is the client's "pitching duel" fix. Two aces facing each
+    # other suppress a total in a way the offence and park terms cannot see: strikeouts
+    # remove balls in play entirely, so the lineups never get the contact that the
+    # matchup numbers assume. Weighted modestly — a duel is a real trap but it is one
+    # signal among several, and starters leave in the sixth.
     "game_total": {
-        "combined_offense": 0.40,
-        "combined_starter_weak": 0.25,
-        "combined_bullpen_tired": 0.20,
-        "park_runs": 0.15,
+        "combined_offense": 0.34,
+        "combined_starter_weak": 0.22,
+        "combined_pen_workload": 0.20,
+        "park_runs": 0.12,
+        "combined_starter_k9": -0.12,
     },
     # pitcher side
     # v2 strikeouts, to the client's spec. His diagnosis was the "vacuum fallacy":
@@ -506,7 +515,11 @@ def score_pitcher_strikeouts(schedule: pd.DataFrame, pitcher_rolling: pd.DataFra
     return df.sort_values("score", ascending=False).reset_index(drop=True)
 def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
                       bullpen: pd.DataFrame, park_factors: pd.DataFrame,
-                      rolling: pd.DataFrame, window: str = "L10") -> tuple[pd.DataFrame, pd.DataFrame]:
+                      rolling: pd.DataFrame, window: str = "L10",
+                      pen_workload: pd.DataFrame | None = None,
+                      pitchers: pd.DataFrame | None = None,
+                      weather: pd.DataFrame | None = None,
+                      ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Score team totals and combined game totals.
 
     Returns (team_totals, game_totals).
@@ -514,6 +527,17 @@ def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
     Unlike player props this is built bottom-up from the same matchup numbers: a team's
     run expectation is its own hitters against the opposing starter, adjusted for how
     much bullpen that opponent has left and how the park plays.
+
+    v2 addresses the client's diagnosis that macro totals get "thrown off by late-inning
+    bullpen collapses or elite pitching duels":
+
+      * bullpen fatigue is now three-day pitch counts and innings for the relief unit
+        (propline.profiles.bullpen_workload) rather than v1's count of arms that
+        happened to pitch recently. Counting bodies treated a pen that threw 350
+        pitches the same as one that threw 100 across the same number of appearances.
+      * pitching duels are caught by a negative combined-K/9 term.
+      * weather enters as a multiplier on the finished score, per the spec's wording,
+        so it nudges an ordering built on baseball rather than competing with it.
     """
     # --- offence: average matchup quality of each lineup ------------------------
     off = (matchups.groupby(["game_pk", "team_id", "team"], as_index=False)
@@ -533,16 +557,16 @@ def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
     form["team_id"] = sorted(matchups["team_id"].unique())
     off = off.merge(form, on="team_id", how="left")
 
-    # --- bullpen: how many arms does each team have left ------------------------
-    if bullpen is not None and not bullpen.empty:
-        pen = (bullpen.assign(avail=lambda d: d.availability.eq("available"))
-                      .groupby("team_id", as_index=False)
-                      .agg(relievers=("player_id", "count"),
-                           available=("avail", "sum")))
-        # fewer available arms -> more runs allowed later in the game
-        pen["bullpen_tired"] = 1 - (pen["available"] / pen["relievers"].replace(0, pd.NA))
+    # --- bullpen: how hard has each relief unit been worked ---------------------
+    # Prefer the v2 workload model. Fall back to v1's arm count only if it is missing,
+    # so a slate can still be scored when the boxscore pull comes up short.
+    if pen_workload is not None and not pen_workload.empty:
+        pen = pen_workload.copy()
+    elif bullpen is not None and not bullpen.empty:
+        from .profiles import bullpen_workload
+        pen = bullpen_workload(bullpen)
     else:
-        pen = pd.DataFrame(columns=["team_id", "bullpen_tired"])
+        pen = pd.DataFrame(columns=["team_id", "pen_workload", "pen_status"])
 
     # --- assemble per-team rows, attaching the OPPONENT's pen and the park ------
     rows = []
@@ -561,32 +585,80 @@ def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
                 "team_id": g[f"{side}_team_id"], "team": g[f"{side}_team"],
                 "opponent": g[f"{opp}_team"], "opp_team_id": g[f"{opp}_team_id"],
                 "opp_starter": g[f"{opp}_probable"],
+                "opp_starter_id": g.get(f"{opp}_probable_id"),
                 "park_runs": park_runs, "park_hr": park_hr,
                 "park_matched": park_matched,
                 "home_away": side,
             })
     tt = pd.DataFrame(rows).merge(off.drop(columns=["team"]), on=["game_pk", "team_id"], how="left")
-    tt = tt.merge(pen[["team_id", "bullpen_tired"]].rename(
-        columns={"team_id": "opp_team_id", "bullpen_tired": "opp_bullpen_tired"}),
-        on="opp_team_id", how="left")
 
-    w = WEIGHTS["team_total"]
-    s = pd.Series(0.0, index=tt.index)
-    for col, weight in w.items():
-        if col in tt.columns:
-            s += _pct(tt[col]) * weight
-    tw = sum(abs(v) for c, v in w.items() if c in tt.columns)
+    # The pen that matters to a team's total is the OPPONENT's — they are the arms it
+    # will face from the sixth inning on.
+    pen_cols = [c for c in ("pen_workload", "pen_status", "pen_pitches_3d",
+                            "pen_innings_3d", "pen_unavailable") if c in pen.columns]
+    if pen_cols:
+        renames = {"team_id": "opp_team_id"}
+        renames.update({c: f"opp_{c}" for c in pen_cols})
+        tt = tt.merge(pen[["team_id"] + pen_cols].rename(columns=renames),
+                      on="opp_team_id", how="left")
+
+    # Opposing starter's WHIP and K/9, the "pitching duel" inputs.
+    if pitchers is not None and not pitchers.empty and "opp_starter_id" in tt.columns:
+        keep = [c for c in ("whip", "k_per_9") if c in pitchers.columns]
+        if keep:
+            tt = tt.merge(
+                pitchers[["player_id"] + keep].rename(columns={
+                    "player_id": "opp_starter_id", "whip": "opp_starter_whip",
+                    "k_per_9": "opp_starter_k9"}),
+                on="opp_starter_id", how="left")
+
+    # Weather, attached before scoring so both boards share one source.
+    wx_cols = ["game_pk", "temp_f", "wind_mph", "wind_dir_deg", "precip_pct",
+               "weather_mult", "indoor", "roof_type"]
+    if weather is not None and not weather.empty:
+        tt = tt.merge(weather[[c for c in wx_cols if c in weather.columns]],
+                      on="game_pk", how="left")
+        tt["weather_mult"] = pd.to_numeric(
+            tt.get("weather_mult"), errors="coerce").fillna(1.0)
+        tt["wind"] = [wind_description(a, b)
+                      for a, b in zip(tt.get("wind_mph", pd.Series(dtype=float)),
+                                      tt.get("wind_dir_deg", pd.Series(dtype=float)))]
+    else:
+        tt["weather_mult"] = 1.0
+
+    # The opposing starter, as the client asked to see him: WHIP and K/9 together, so
+    # a duel is obvious at a glance without opening another tab.
+    tt["starter_whip_k9"] = [
+        _whip_k9_label(a, b)
+        for a, b in zip(tt.get("opp_starter_whip", pd.Series(dtype=float)),
+                        tt.get("opp_starter_k9", pd.Series(dtype=float)))]
+
     tt["prop"] = "team_total"
-    tt["score"] = (100 * s / tw).round(1) if tw else 0.0
+    tt["score"] = _apply_weather(_weighted_score(tt, WEIGHTS["team_total"]),
+                                 tt["weather_mult"])
     tt["rank"] = tt["score"].rank(ascending=False, method="min").astype(int)
     tt = tt.sort_values("score", ascending=False).reset_index(drop=True)
 
     # --- combine the two halves of each game ------------------------------------
-    gt = (tt.groupby(["game_pk", "venue", "park_runs", "park_hr"], as_index=False)
-            .agg(combined_offense=("lineup_matchup_woba", "sum"),
-                 combined_starter_weak=("opp_starter_weak", "sum"),
-                 combined_bullpen_tired=("opp_bullpen_tired", "sum"),
-                 park_matched=("park_matched", "first")))
+    agg = {"combined_offense": ("lineup_matchup_woba", "sum"),
+           "combined_starter_weak": ("opp_starter_weak", "sum"),
+           "park_matched": ("park_matched", "first"),
+           "weather_mult": ("weather_mult", "first")}
+    # Summing each side's OPPONENT pen covers both relief units exactly once.
+    if "opp_pen_workload" in tt.columns:
+        agg["combined_pen_workload"] = ("opp_pen_workload", "sum")
+    if "opp_starter_k9" in tt.columns:
+        # MEAN, not sum. A sum treats an unresolved starter as a zero-strikeout pitcher:
+        # rookies below the 20-IP cutoff in pitcher_stats have no K/9, which halved the
+        # combined figure and — because this term is weighted negatively — pushed those
+        # games UP the board. Houston @ Mets ranked first on exactly that artefact.
+        # Averaging the starters we do have leaves the estimate honest either way.
+        agg["combined_starter_k9"] = ("opp_starter_k9", "mean")
+        agg["starters_resolved"] = ("opp_starter_k9", "count")
+    if "opp_starter_whip" in tt.columns:
+        agg["combined_starter_whip"] = ("opp_starter_whip", "mean")
+    gt = tt.groupby(["game_pk", "venue", "park_runs", "park_hr"],
+                    as_index=False).agg(**agg)
 
     # Build the "Away @ Home" label from the schedule itself. Deriving it from group
     # order silently reverses fixtures — it put the Braves away at their own park.
@@ -595,18 +667,94 @@ def score_game_totals(schedule: pd.DataFrame, matchups: pd.DataFrame,
     )[["game_pk", "teams", "game_time_utc"]]
     gt = gt.merge(label, on="game_pk", how="left")
 
-    w = WEIGHTS["game_total"]
-    s = pd.Series(0.0, index=gt.index)
-    for col, weight in w.items():
-        if col in gt.columns:
-            s += _pct(gt[col]) * weight
-    tw = sum(abs(v) for c, v in w.items() if c in gt.columns)
+    if weather is not None and not weather.empty:
+        gt = gt.merge(weather[[c for c in wx_cols if c in weather.columns
+                               and c != "weather_mult"]], on="game_pk", how="left")
+        gt["wind"] = [wind_description(a, b)
+                      for a, b in zip(gt.get("wind_mph", pd.Series(dtype=float)),
+                                      gt.get("wind_dir_deg", pd.Series(dtype=float)))]
+
+    # Per-side detail the client asked for by name: pen status for each club, and both
+    # starters' WHIP/K9 side by side.
+    gt = _attach_game_sides(gt, tt, schedule)
+
     gt["prop"] = "game_total"
-    gt["score"] = (100 * s / tw).round(1) if tw else 0.0
+    gt["score"] = _apply_weather(_weighted_score(gt, WEIGHTS["game_total"]),
+                                 gt["weather_mult"])
     gt["rank"] = gt["score"].rank(ascending=False, method="min").astype(int)
     gt = gt.sort_values("score", ascending=False).reset_index(drop=True)
 
     return tt, gt
+
+
+def _whip_k9_label(whip, k9) -> str:
+    """"1.12 WHIP / 9.4 K9" — one glanceable cell instead of two columns."""
+    if pd.isna(whip) and pd.isna(k9):
+        return ""
+    w = "?" if pd.isna(whip) else f"{float(whip):.2f}"
+    k = "?" if pd.isna(k9) else f"{float(k9):.1f}"
+    return f"{w} WHIP / {k} K9"
+
+
+def _apply_weather(score: pd.Series, mult) -> pd.Series:
+    """Nudge a finished score by the weather multiplier, keeping the 0-100 scale.
+
+    Clipped at 100: the multiplier can only reorder and shade the board, never push a
+    game off the top of the scale that every other prop is read against.
+    """
+    m = pd.to_numeric(mult, errors="coerce").fillna(1.0)
+    return (score * m).clip(0, 100).round(1)
+
+
+def _attach_game_sides(gt: pd.DataFrame, tt: pd.DataFrame,
+                       schedule: pd.DataFrame) -> pd.DataFrame:
+    """Home/away bullpen status and both starters' WHIP-K9 line."""
+    side = tt[["game_pk", "team_id", "home_away"]].copy()
+    for col, out in (("opp_pen_status", "pen_status"),
+                     ("starter_whip_k9", "starter_whip_k9")):
+        if col in tt.columns:
+            side[out] = tt[col].values
+
+    for home_away in ("home", "away"):
+        part = side[side["home_away"] == home_away]
+        if part.empty:
+            continue
+        # A team's own pen status is carried on the OTHER side's row (each row holds
+        # its opponent's pen), so flip the label back to the club it belongs to.
+        flip = {"home": "away", "away": "home"}[home_away]
+        src = side[side["home_away"] == flip]
+        if "pen_status" in src.columns:
+            gt = gt.merge(src[["game_pk", "pen_status"]].rename(
+                columns={"pen_status": f"pen_status_{home_away}"}),
+                on="game_pk", how="left")
+        if "starter_whip_k9" in part.columns:
+            # The starter a side FACES is that side's opponent's starter, which is the
+            # value already on this row.
+            gt = gt.merge(part[["game_pk", "starter_whip_k9"]].rename(
+                columns={"starter_whip_k9": f"starter_{flip}_whip_k9"}),
+                on="game_pk", how="left")
+
+    home_col, away_col = "starter_home_whip_k9", "starter_away_whip_k9"
+    if home_col in gt.columns and away_col in gt.columns:
+        gt["starter_whip_k9"] = [
+            " vs ".join([x for x in (h, a) if x]) or ""
+            for h, a in zip(gt[home_col].fillna(""), gt[away_col].fillna(""))]
+
+    # Bullpen status spelled out with the club attached. The rationale model is given
+    # this rather than the bare home/away labels: handed pen_status_home alongside a
+    # "Away @ Home" string it has no way to tell which club is which, and it duly
+    # reported a rested Nationals bullpen on a night Washington's pen was overworked.
+    if {"pen_status_home", "pen_status_away"} <= set(gt.columns):
+        names = schedule[["game_pk", "home_team", "away_team"]]
+        gt = gt.merge(names, on="game_pk", how="left")
+        gt["pen_summary"] = [
+            "; ".join(part for part in (
+                f"{ht} bullpen {hs}" if pd.notna(hs) and str(hs) != "nan" else "",
+                f"{at} bullpen {as_}" if pd.notna(as_) and str(as_) != "nan" else "",
+            ) if part)
+            for ht, hs, at, as_ in zip(gt["home_team"], gt["pen_status_home"],
+                                       gt["away_team"], gt["pen_status_away"])]
+    return gt
 
 
 def attach_market_edge(totals: pd.DataFrame, vegas: pd.DataFrame) -> pd.DataFrame:
