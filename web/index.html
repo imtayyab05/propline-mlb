@@ -661,7 +661,10 @@ async function sb(table, params){
 
 async function loadSlates(){
   const runs = await sb('pipeline_runs',
-    {select:'slate_date', order:'slate_date.desc', limit:60});
+    // Rows, not days. Each slate writes a run row per collection and per processing
+    // pass, several times a day, so a 60-row limit silently capped the date picker at
+    // about six days of history. 2000 covers a full season.
+    {select:'slate_date', order:'slate_date.desc', limit:2000});
   const dates = [...new Set(runs.map(r=>r.slate_date))];
   const sel = $('#slate');
   sel.innerHTML = dates.map(d=>`<option value="${d}">${d}</option>`).join('')
@@ -743,16 +746,85 @@ const scoreClass = s => s >= 80 ? 's-hi' : s >= 60 ? 's-mid' : 's-lo';
 const PAGE_ROWS = 60;
 let showAll = false;
 
+// Per-prop columns, mirroring propline/output.py. In v2 the props are scored on
+// genuinely different inputs — total bases takes the better of two paths, home runs
+// weigh a matchup matrix and a barrel cap, strikeouts are about the lineup faced — so
+// a single shared column set would hide the numbers that actually drive each board.
+//
+// `get` reads from the pick row first, then its details blob. `fmt` is optional.
+const pct1 = v => v == null ? '' : `${(+v).toFixed(1)}%`;
+const num3 = v => v == null ? '' : (+v).toFixed(3);
+const yesNo = v => v === true ? 'yes' : v === false ? '' : (v ?? '');
+
+const EXTRA_COLS = {
+  hits: [
+    ['Recent xwOBA', 'recent_xwoba', num3],
+    ['Contact% (14d)', 'contact_rate_recent', pct1],
+    ['Line Drive%', 'line_drive_rate', pct1],
+    ['Ground Ball%', 'ground_ball_rate', pct1],
+    ['GB Penalty', 'gb_penalty'],
+    ['SP WHIP', 'starter_whip', num3],
+    ['SP Whiff', 'starter_whiff_matchup'],
+  ],
+  total_bases: [
+    ['Path', 'tb_path'],
+    ['Power', 'tb_power_score'],
+    ['Volume', 'tb_volume_score'],
+    ['Strict 2+', 'tb_strict', yesNo],
+    ['ISO (14d)', 'iso_recent_14day', num3],
+    ['Barrel%', 'recent_barrel_pct', pct1],
+    ['Matchup', 'pitch_matchup_grade'],
+  ],
+  home_runs: [
+    ['Arsenal RV', 'hr_matchup_rv', num3],
+    ['Barrel%', 'recent_barrel_pct', pct1],
+    ['Fly Ball%', 'fly_ball_rate', pct1],
+    ['ISO (14d)', 'iso_recent_14day', num3],
+    ['Suppression', 'pitcher_barrel_suppression_flag'],
+    ['Capped', 'hr_suppression_capped', yesNo],
+    ['Matchup', 'pitch_matchup_grade'],
+  ],
+  rbis: [
+    ['Table-Setter OBP', 'table_setter_obp', num3],
+    ['Lineup Ctx', 'context_mult'],
+    ['vs Arsenal xSLG', 'matchup_est_slg', num3],
+    ['Matchup', 'pitch_matchup_grade'],
+  ],
+  runs: [
+    ['Top-Order OBP', 'top_order_obp', num3],
+    ['Table-Setter OBP', 'table_setter_obp', num3],
+    ['Lineup Ctx', 'context_mult'],
+    ['Matchup', 'pitch_matchup_grade'],
+  ],
+  strikeouts: [
+    ['Split K', 'split_k_rate_matchup'],
+    ['Whiff% (14d)', 'whiff_14day', pct1],
+    ['Opp Lineup K%', 'opp_lineup_k_pct', pct1],
+    ['WHIP', 'pitcher_whip', num3],
+    ['Exp. Pitches', 'expected_pitch_limit'],
+    ['Leash', 'leash_penalty'],
+  ],
+};
+
+function cellValue(row, key, fmt){
+  const d = row.details || {};
+  const v = row[key] !== undefined ? row[key] : d[key];
+  if (v == null || v === '') return '';
+  return fmt ? fmt(v) : v;
+}
+
 function render(){
   const prop = PROPS.find(p=>p.key===current);
   const all = filtered();
   const data = showAll ? all : all.slice(0, PAGE_ROWS);
   const isPlayer = prop.kind === 'player';
+  const extra = EXTRA_COLS[current] || [];
 
   $('#thead').innerHTML = isPlayer
     ? `<tr><th>#</th><th>${current==='strikeouts'?'Pitcher':'Player'}</th><th>Team</th>
        <th>${current==='strikeouts'?'Opponent':'Opposing SP'}</th><th>Score</th>
-       <th>Lineup</th><th>Recent</th><th>Why</th></tr>`
+       ${current==='strikeouts'?'':'<th>Lineup</th>'}<th>Recent</th>
+       ${extra.map(c=>`<th>${esc(c[0])}</th>`).join('')}<th>Why</th></tr>`
     : `<tr><th>#</th><th>Matchup</th><th>Venue</th><th>Score</th>
        <th>Park Runs</th><th>Why</th></tr>`;
 
@@ -779,14 +851,17 @@ function render(){
         ? '<span class="badge b-proj">projected</span>'
       : r.lineup_status === 'scratched'
         ? '<span class="badge b-scr">scratched</span>' : '';
+    const cells = extra.map(([, key, fmt]) =>
+      `<td class="num">${esc(cellValue(r, key, fmt))}</td>`).join('');
     return `<tr ${st}>
       <td class="rank">${r.rank}</td>
       <td class="name">${esc(r.subject_name)}</td>
       <td class="num">${esc(r.team||'')}</td>
       <td class="num">${esc(r.opponent||'')}</td>
       <td class="score ${scoreClass(r.score)}">${r.score}</td>
-      <td>${badge}</td>
+      ${current==='strikeouts'?'':`<td>${badge}</td>`}
       <td class="num ${thin?'thin':''}">${games!=null?`${games} G`:'—'}</td>
+      ${cells}
       <td class="why">${esc(r.rationale||'')}</td></tr>`;
   }).join('');
 

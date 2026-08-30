@@ -12,12 +12,35 @@ from .db import delete_where, read, upsert
 
 # signals stored alongside each pick so the dashboard can show the "why" without
 # recomputing anything
-BATTER_DETAIL = ["matchup_est_woba", "matchup_est_slg", "matchup_whiff", "matchup_k_pct",
-                 "recent_barrel_pct", "recent_hard_hit", "recent_games", "recent_pa",
-                 "primary_pitch", "best_pitch_for_batter", "best_pitch_est_woba",
-                 "arsenal_coverage", "batting_order"]
-PITCHER_DETAIL = ["recent_k_per_game", "recent_k_pct", "recent_whiff_pct",
-                  "opp_lineup_k_pct", "recent_pitches_per_game", "recent_games"]
+# Stored alongside each pick so the dashboard can show the "why" without recomputing.
+# Per prop, because in v2 the props are scored on genuinely different inputs and a
+# shared list would either omit what matters or carry dead weight on every row.
+PROP_DETAIL = {
+    "hits": ["recent_xwoba", "contact_rate", "contact_rate_recent", "line_drive_rate",
+             "sweet_spot_pct", "ground_ball_rate", "gb_penalty", "starter_whip",
+             "starter_whiff_matchup", "lineup_position"],
+    "total_bases": ["tb_path", "tb_power_score", "tb_volume_score", "tb_strict",
+                    "iso_recent_14day", "iso_season", "recent_barrel_pct",
+                    "starter_slg_allowed_vs_hand", "pitch_matchup_grade"],
+    "home_runs": ["hr_matchup_rv", "recent_barrel_pct", "fly_ball_rate",
+                  "ground_ball_rate", "iso_recent_14day", "recent_hard_hit",
+                  "pitcher_barrel_suppression_flag", "hr_suppression_capped",
+                  "pitch_matchup_grade"],
+    "rbis": ["table_setter_obp", "context_mult", "matchup_est_slg", "recent_tb_rate",
+             "pitch_matchup_grade", "lineup_position"],
+    "runs": ["top_order_obp", "table_setter_obp", "context_mult", "matchup_est_woba",
+             "pitch_matchup_grade", "lineup_position"],
+}
+
+# Always useful, whatever the prop.
+COMMON_DETAIL = ["recent_games", "recent_pa", "primary_pitch", "best_pitch_for_batter",
+                 "arsenal_coverage"]
+
+PITCHER_DETAIL = ["split_k_matchup", "split_k_rate_matchup", "whiff_14day",
+                  "opp_lineup_k_pct", "pitcher_whip", "whip_efficiency",
+                  "expected_pitch_limit", "leash_penalty", "recent_games",
+                  "recent_k_per_game", "recent_k_pct"]
+
 GAME_DETAIL = ["combined_offense", "combined_starter_weak", "combined_bullpen_tired"]
 TEAM_DETAIL = ["lineup_matchup_woba", "opp_starter_weak", "opp_bullpen_tired",
                "recent_team_form"]
@@ -121,7 +144,7 @@ def publish_slate(slate_date, schedule, lineups, bullpen,
                 "rank": g["rank"], "score": g["score"],
                 "lineup_status": g.get("status"),
                 "rationale": g.get("rationale"),
-                "details": _details(g, BATTER_DETAIL),
+                "details": _details(g, PROP_DETAIL.get(prop, []) + COMMON_DETAIL),
             }))
 
     if pitcher_scores is not None and not pitcher_scores.empty:

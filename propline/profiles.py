@@ -27,10 +27,15 @@ def _num(df: pd.DataFrame, col: str) -> pd.Series:
 
 
 def _as_pct(s: pd.Series) -> pd.Series:
-    """Savant mixes fractions and percentages between files. Return percentages."""
+    """Savant mixes fractions and percentages between files. Return percentages.
+
+    Rounded to one decimal: these end up in a sheet the client reads, and a batted-ball
+    rate carried to six decimals is noise pretending to be precision.
+    """
     s = pd.to_numeric(s, errors="coerce")
     # a rate column whose maximum is <= 1 is expressed as a fraction
-    return s * 100 if s.notna().any() and s.max() <= 1.0 else s
+    out = s * 100 if s.notna().any() and s.max() <= 1.0 else s
+    return out.round(1)
 
 
 def batter_profiles(batted_ball: pd.DataFrame, exit_velocity: pd.DataFrame,
@@ -100,13 +105,16 @@ def batter_profiles(batted_ball: pd.DataFrame, exit_velocity: pd.DataFrame,
     if day14 is not None and not day14.empty:
         d = day14[day14.get("split", "all") == "all"] if "split" in day14 else day14
         cols = [c for c in ("player_id", "iso", "ab", "games") if c in d.columns]
+        cols += [c for c in ("contact_rate",) if c in d.columns]
         d = d[cols].rename(columns={"iso": "iso_recent_14day",
-                                    "ab": "ab_14day", "games": "games_14day"})
+                                    "ab": "ab_14day", "games": "games_14day",
+                                    "contact_rate": "contact_rate_recent"})
         out = out.merge(d, on="player_id", how="left")
 
     keep = ["player_id", "line_drive_rate", "ground_ball_rate", "fly_ball_rate",
             "sweet_spot_pct",
-            "contact_rate", "iso_season", "iso_recent_14day", "ab_14day",
+            "contact_rate", "contact_rate_recent", "iso_season",
+            "iso_recent_14day", "ab_14day",
             "games_14day"]
     return out[[c for c in keep if c in out.columns]]
 

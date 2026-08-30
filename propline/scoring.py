@@ -283,6 +283,17 @@ def score_batter_props(matchups: pd.DataFrame, rolling: pd.DataFrame,
     if lineup_ctx is not None and not lineup_ctx.empty:
         df = df.merge(lineup_ctx, on=["game_pk", "team_id", "player_id"], how="left")
 
+    # His spec asks for the batting slot under its own name, and for the starter's
+    # vulnerability to contact as a word rather than a percentage — both are for
+    # scanning a sheet quickly, not for the maths.
+    df["lineup_position"] = df["batting_order"]
+    if "starter_whiff" in df.columns:
+        q = _pct(df["starter_whiff"])
+        # low whiff rate = easier to make contact against = favourable for a hit
+        df["starter_whiff_matchup"] = pd.cut(
+            q, [-0.01, 0.33, 0.66, 1.01],
+            labels=["Favorable", "Neutral", "Tough"]).astype("object")
+
     # --- client-facing grades ----------------------------------------------------
     # A letter for how the hitter handles this starter's actual mix. The underlying
     # number is an expected wOBA against a weighted arsenal, which is precise but not

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "propline-web",
+      "runtimeExecutable": "D:/Programming/Anaconda/python.exe",
+      "runtimeArgs": ["-m", "http.server", "5173", "--directory", "web"],
+      "port": 5173
+    }
+  ]
+}

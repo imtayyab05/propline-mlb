@@ -66,6 +66,15 @@ def _agg(g: pd.DataFrame) -> pd.Series:
     ab = int(pa - g["events"].isin(NON_AB_EVENTS).sum())
     tb = int(hits.sum())
 
+    # Bat-to-ball over the same window. Computed here rather than downloaded: the
+    # windowed bat-tracking pull only exists split by pitcher hand, and this is a
+    # number already sitting in the pitch data.
+    swstr = g["description"].isin(["swinging_strike", "swinging_strike_blocked"]).sum()
+    swings = g["description"].isin([
+        "swinging_strike", "swinging_strike_blocked", "foul", "foul_tip",
+        "hit_into_play",
+    ]).sum()
+
     return pd.Series({
         "games": g["game_pk"].nunique(),
         "pa": int(pa),
@@ -88,6 +97,7 @@ def _agg(g: pd.DataFrame) -> pd.Series:
         "hard_hit_pct": round(100 * (ev >= HARD_HIT_MPH).sum() / bbe, 1) if bbe else None,
         "barrel_pct": round(100 * (g["launch_speed_angle"] == BARREL).sum() / bbe, 1) if bbe else None,
         "xwoba_contact": round(g["estimated_woba_using_speedangle"].mean(), 3) if bbe else None,
+        "contact_rate": round(100 * (1 - swstr / swings), 1) if swings else None,
     })
 
 
