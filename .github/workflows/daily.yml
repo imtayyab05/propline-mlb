@@ -71,6 +71,10 @@ jobs:
 
     env:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # Without this the odds fetch raises "no key", process.py catches it and carries
+      # on, and every scheduled run publishes with empty market columns — while local
+      # runs work fine because .env has the key. It failed silently for days.
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
