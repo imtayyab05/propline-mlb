@@ -8,7 +8,9 @@
 import { dispatchWorkflow } from '../lib/github.mjs';
 
 export default async () => {
-  const res = await dispatchWorkflow({});   // reuses the morning's Savant download
+  // run_kind both labels the run and tells the workflow to reuse the morning's
+  // Savant download rather than re-fetching it.
+  const res = await dispatchWorkflow({ run_kind: 'scheduled_midday' });
 
   if (res.ok) {
     console.log('midday slate dispatched');

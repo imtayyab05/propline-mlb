@@ -731,7 +731,7 @@ async function loadFreshness(){
   const failed = runs.some(r => r.status === 'failed' && r.slate_date === slateDate
                                 && r.id > (runs.find(x=>x.status==='ok')?.id ?? -1));
   $('#freshness').innerHTML =
-    `updated <strong>${ago}</strong> · ${esc(last.run_type)}` +
+    `updated <strong>${ago}</strong> · ${esc(runLabel(last.run_type))}` +
     (failed ? ' <span class="badge b-err">last run failed</span>' : '');
 
   const counts = await sb('lineups',
@@ -799,6 +799,18 @@ const pct1 = v => v == null ? '' : `${(+v).toFixed(1)}%`;
 const num3 = v => v == null ? '' : (+v).toFixed(3);
 const yesNo = v => v === true ? 'yes' : v === false ? '' : (v ?? '');
 const tempF = v => v == null ? '' : `${Math.round(+v)}°F`;
+
+// The pipeline records which slot produced a run. Show it in words — the raw
+// values (scheduled_morning, ...) are for the database, not the header.
+const RUN_LABELS = {
+  scheduled_morning:   'morning run',
+  scheduled_midday:    'midday run',
+  scheduled_afternoon: 'afternoon run',
+  scheduled_evening:   'evening run',
+  scheduled_late:      'late run',
+  manual:              'manual run',
+};
+const runLabel = k => RUN_LABELS[k] || k || 'run';
 
 const EXTRA_COLS = {
   // Totals boards. v2 adds the bullpen-fatigue and weather signals the client asked

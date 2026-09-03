@@ -56,6 +56,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_kind:
+        description: 'Which slot dispatched this. Netlify sets it; leave blank by hand.'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: propline-slate
@@ -92,23 +97,41 @@ jobs:
 
       - name: Work out the slate, the run type, and whether to re-download
         id: cfg
+        # Inputs arrive as environment variables rather than being spliced into the
+        # script text. A `${{ }}` expression inside `run:` is substituted before the
+        # shell parses the line, so a crafted value could otherwise escape the quotes.
+        env:
+          IN_DATE: ${{ inputs.slate_date }}
+          IN_KIND: ${{ inputs.run_kind }}
+          IN_FULL: ${{ inputs.full_pull }}
         run: |
-          DATE="${{ inputs.slate_date }}"
+          DATE="$IN_DATE"
           if [ -z "$DATE" ]; then DATE=$(date -u +%F); fi
           echo "date=$DATE" >> "$GITHUB_OUTPUT"
 
-          case "${{ github.event.schedule }}" in
-            "0 13 * * *")  KIND=scheduled_morning;   REUSE=false ;;
-            "30 15 * * *") KIND=scheduled_midday;    REUSE=true  ;;
-            "0 18 * * *")  KIND=scheduled_afternoon; REUSE=true  ;;
-            "0 21 * * *")  KIND=scheduled_evening;   REUSE=true  ;;
-            "0 23 * * *")  KIND=scheduled_late;      REUSE=true  ;;
-            *)             KIND=manual;              REUSE=true  ;;
+          # The label comes from whoever dispatched us: Netlify's scheduled functions
+          # send run_kind, and the dashboard's Update Now button does not — so a
+          # hand-triggered run is correctly reported as manual.
+          #
+          # This previously switched on `github.event.schedule`, which has been empty
+          # ever since the `schedule:` trigger was removed (see the note above). Every
+          # run therefore fell through to `manual`: the dashboard reported automated
+          # runs as hand-triggered, and the morning full pull never took effect.
+          #
+          # Matching against a fixed list rather than trusting the value keeps an
+          # arbitrary string out of the run label and out of the filenames built from it.
+          case "$IN_KIND" in
+            scheduled_morning)
+              KIND="$IN_KIND"; REUSE=false ;;
+            scheduled_midday|scheduled_afternoon|scheduled_evening|scheduled_late)
+              KIND="$IN_KIND"; REUSE=true  ;;
+            *)
+              KIND=manual;     REUSE=true  ;;
           esac
 
           # A manual run defaults to reusing the cache; tick full_pull to force a
           # fresh download.
-          if [ "${{ inputs.full_pull }}" = "true" ]; then REUSE=false; fi
+          if [ "$IN_FULL" = "true" ]; then REUSE=false; fi
 
           echo "kind=$KIND"   >> "$GITHUB_OUTPUT"
           echo "reuse=$REUSE" >> "$GITHUB_OUTPUT"
