@@ -53,8 +53,21 @@ class Pull:
 
 PULLS: list[Pull] = [
     # statistics tab
+    # min=20 plate appearances, NOT "q" (qualified), for two separate reasons.
+    #
+    # 1. On 5 Sep 2026 /leaderboard/custom stopped honouring min=q and began returning
+    #    the HTML page instead of a CSV, for batter AND pitcher alike. That took the
+    #    whole pipeline down: collect exits non-zero on a failed pull, so processing
+    #    and publishing never ran. Any numeric min still works.
+    # 2. Qualified was always too strict here. It returned 138 batters and covered just
+    #    110 of the 252 hitters in that day's lineups, so contact rate and on-base
+    #    quality were missing for more than half the board. min=20 returns 585 and
+    #    covers 251 of 252 — the same coverage as min=1 or min=10, without admitting
+    #    one-plate-appearance samples that would rank on noise.
+    #
+    # Same threshold and same reasoning as pitcher_stats below.
     Pull("batter_stats", "/leaderboard/custom",
-         {"type": "batter", "filter": "", "min": "q", "selections": CUSTOM_SELECTIONS,
+         {"type": "batter", "filter": "", "min": "20", "selections": CUSTOM_SELECTIONS,
           "sort": "pa", "sortDir": "desc"}),
     # min=20 batters faced, not "qualified". Qualified returns only 53 pitchers, which
     # is starters with a full season of innings — so two thirds of any given day's

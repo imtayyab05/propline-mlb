@@ -127,8 +127,12 @@ def main() -> int:
     if latest:
         games = _count("games", {"game_date": f"eq.{latest}"})
         picks = _count("prop_picks", {"slate_date": f"eq.{latest}"})
+        # Only the top ~25 of each prop get written explanations (--explain-top), so
+        # measuring against every published row reported 3% and looked like an outage
+        # when the run had actually explained everything it was asked to.
+        top_n = _count("prop_picks", {"slate_date": f"eq.{latest}", "rank": "lte.25"})
         no_why = _count("prop_picks", {"slate_date": f"eq.{latest}",
-                                       "rationale": "is.null"})
+                                       "rank": "lte.25", "rationale": "is.null"})
         gpicks = _count("game_picks", {"slate_date": f"eq.{latest}"})
         conf = _count("lineups", {"game_date": f"eq.{latest}", "status": "eq.confirmed"})
         proj = _count("lineups", {"game_date": f"eq.{latest}", "status": "eq.projected"})
@@ -137,10 +141,11 @@ def main() -> int:
         print(f"  games             {games}")
         print(f"  player picks      {picks}")
         print(f"  game/team picks   {gpicks}")
-        if picks and no_why is not None:
-            have = picks - no_why
-            flag = "  <-- AI quota likely exhausted" if have / max(picks, 1) < 0.2 else ""
-            print(f"  with explanation  {have} of {picks} ({_pct(have, picks)}){flag}")
+        if top_n and no_why is not None:
+            have = top_n - no_why
+            flag = ("  <-- AI daily cap hit" if have / max(top_n, 1) < 0.8 else "")
+            print(f"  explanations      {have} of the top {top_n} "
+                  f"({_pct(have, top_n)}){flag}   [only the top picks get text]")
         print(f"  lineups           {conf} confirmed / {proj} projected / {scr} scratched")
 
         if games == 0:
@@ -177,9 +182,7 @@ def main() -> int:
               f"(~{daily:.0f}/day){warn}")
         print(f"                    a 14-game slate costs ~16; 500/month is the free tier")
 
-    blanks = None
-    if latest:
-        blanks = no_why
+    blanks = no_why if latest else None
     if blanks:
         print("  groq (AI text)    explanations missing on the latest slate — daily "
               "token cap. Refills next run.")
@@ -191,11 +194,14 @@ def main() -> int:
     total_picks = _count("prop_picks")
     total_games = _count("game_picks")
     if total_picks:
-        per_slate = total_picks / max(len(slates), 1)
         print(f"  prop_picks        {total_picks:,} rows")
         print(f"  game_picks        {total_games:,} rows")
-        print(f"  growth            ~{per_slate:,.0f} rows per slate; nothing prunes "
-              f"old slates yet")
+        if latest and picks:
+            # From the latest slate itself. Dividing the table total by the slates in
+            # the reporting window counted history against a short window and reported
+            # ~4,400 rows a slate when the real figure is ~1,250.
+            print(f"  growth            ~{picks + (gpicks or 0):,} rows on the latest "
+                  f"slate; nothing prunes old slates yet")
         if total_picks > 150_000:
             print("                    consider a 90-day retention policy "
                   "(free tier is 500 MB)")
@@ -212,7 +218,7 @@ def main() -> int:
     month = datetime.now().strftime("%B %Y")
     print(f"PropLine MLB — {month} status\n")
     print(f"- Automated runs: {len(processing)} publishes over the last {args.days} days"
-          f"{f', {len(failed)} failed and were re-run' if failed else ', no failures'}.")
+          f"{f', {len(failed)} failed' if failed else ', no failures'}.")
     if latest:
         print(f"- Latest slate ({latest}): {games} games, {picks} ranked player picks, "
               f"{gpicks} game and team totals.")
