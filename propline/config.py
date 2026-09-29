@@ -147,7 +147,14 @@ def statcast_search_params(date_start, date_end, season, player_type="batter"):
     return {
         "all": "true",
         "hfSea": f"{season}|",
-        "hfGT": "R|",
+        # Regular season plus every postseason round: F = Wild Card, D = Division
+        # Series, L = League Championship, W = World Series. With "R|" alone the
+        # recent-form windows ignored playoff games entirely and emptied out as the
+        # postseason went on — over the 2025 Wild Card dates it returned 0 pitches
+        # against 3,171 with these codes. Harmless in the regular season, when no such
+        # games exist. Spring training (S), exhibitions (E) and the All-Star Game (A)
+        # stay excluded on purpose.
+        "hfGT": "R|F|D|L|W|",
         "game_date_gt": date_start,
         "game_date_lt": date_end,
         "player_type": player_type,
