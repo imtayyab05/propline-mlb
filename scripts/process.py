@@ -84,6 +84,29 @@ def main() -> int:
     x = pd.ExcelFile(inter)
     lineups = pd.read_excel(x, "lineups")
     schedule = pd.read_excel(x, "schedule")
+
+    # Off-days are normal: the gap between the regular season and the playoffs, the
+    # days between playoff rounds, the All-Star break, the whole winter. Before this
+    # guard an empty slate crashed the matchup engine with KeyError 'game_pk', and
+    # because that happened before the publish step the failure was never written to
+    # pipeline_runs — every run on 28 Sep 2026 failed in GitHub with nothing in the log.
+    if schedule.empty:
+        print("\n  ok    no games scheduled — nothing to score today")
+        if args.publish:
+            log_run(day, args.run_kind, "processing", "ok",
+                    detail="no games scheduled", started_at=started)
+        return 0
+
+    # Games but no lineups is NOT an off-day — projected lineups are always built from
+    # the depth charts — so it is logged as a failure rather than waved through.
+    if lineups.empty:
+        msg = f"{len(schedule)} games scheduled but no lineups collected"
+        print(f"\n  FAIL  {msg}")
+        if args.publish:
+            log_run(day, args.run_kind, "processing", "failed", detail=msg,
+                    started_at=started)
+        return 1
+
     rolling = pd.read_excel(x, "rolling_splits")
 
     ba = pd.read_csv(raw_dir / "batter_pitch_arsenal_stats.csv")
