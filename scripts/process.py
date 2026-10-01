@@ -133,6 +133,20 @@ def main() -> int:
     pitcher_hand = {i: d["throws"] for i, d in details.items() if d.get("throws")}
 
     matchups = build_matchups(lineups, schedule, ba, pa, pitcher_hand=pitcher_hand)
+
+    # Games are on, but no game has a named starter yet, so there is nothing to score
+    # a hitter against. Not a failure: MLB posts probables later in the day — this was
+    # the 1 Oct 2026 Wild Card Game 3, confirmed overnight, starters TBD until the
+    # afternoon. Exit cleanly so the next scheduled run picks the slate up.
+    if matchups.empty:
+        msg = (f"{len(schedule)} game(s) scheduled but no starting pitchers announced "
+               f"yet — will score on the next run")
+        print(f"\n  ok    {msg}")
+        if args.publish:
+            log_run(day, args.run_kind, "processing", "ok", detail=msg,
+                    started_at=started)
+        return 0
+
     matchups["bats"] = matchups["player_id"].map(
         lambda i: (details.get(int(i)) or {}).get("bats"))
     print(f"  ok    {len(matchups)} hitter-vs-starter matchups "

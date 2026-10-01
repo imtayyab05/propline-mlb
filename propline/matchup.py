@@ -119,6 +119,13 @@ def build_matchups(lineups: pd.DataFrame, schedule: pd.DataFrame,
         rows.append(row)
 
     out = pd.DataFrame(rows)
+    if out.empty:
+        # Every hitter dropped for want of an opposing starter — typically one game
+        # whose probables are still TBD (an "if necessary" playoff game confirmed
+        # overnight). Return an empty frame WITH the key columns: an empty frame
+        # without them crashed the sort below with KeyError 'game_pk', which is what
+        # failed both scheduled runs on 1 Oct 2026. The caller decides what to do.
+        return pd.DataFrame(columns=keys)
     for c in ("matchup_est_woba", "matchup_est_slg", "matchup_whiff",
               "matchup_k_pct", "matchup_hard_hit", "starter_est_woba_allowed",
               "starter_whiff"):
