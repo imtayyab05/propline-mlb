@@ -17,7 +17,14 @@
   # `ignore` skips the build when the command exits 0, and `git diff --quiet` exits 0
   # when there is no difference. Comparing the last DEPLOYED commit against this one
   # rather than HEAD^ means a push of several commits is judged as a whole.
-  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- web/ netlify/ netlify.toml"
+  #
+  # Fail-safe added 3 Oct 2026. With no build cache Netlify sets CACHED_COMMIT_REF to the
+  # SAME commit as COMMIT_REF, so the diff compared a commit with itself, found nothing,
+  # and skipped the deploy. That is what silently held back the sortable-columns change
+  # after a month with no site deploys (the cache had expired). Now: if the two refs are
+  # equal we cannot tell what changed, so build. A failing git diff (e.g. the old commit
+  # is missing from a shallow clone) also exits non-zero, which also means build.
+  ignore = "[ \"$CACHED_COMMIT_REF\" != \"$COMMIT_REF\" ] && git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- web/ netlify/ netlify.toml"
 
 [functions]
   node_bundler = "esbuild"
