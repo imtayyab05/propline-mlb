@@ -50,9 +50,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="PropLine MLB — processing")
     ap.add_argument("--date", default=date.today().isoformat())
     ap.add_argument("--window", default="L10", choices=["L5", "L10"])
-    ap.add_argument("--top", type=int, default=40,
-                    help="rows per tab in the Excel workbook, where a long tab is just "
-                         "harder to read")
+    ap.add_argument("--top", type=int, default=0,
+                    help="rows per tab in the Excel workbook; 0 means every row. It was 40,"
+                         " but the client sorts and filters in Excel and noticed the cut "
+                         "(Oct 2026) — a capped export hides the picks he wants to re-rank.")
     ap.add_argument("--publish-top", type=int, default=0,
                     help="rows per category written to the database; 0 means all. The "
                          "dashboard filters what it is given, so publishing only the top "
@@ -308,7 +309,7 @@ def main() -> int:
         "Games": len(schedule),
         "Lineup status": ", ".join(f"{k}: {v}" for k, v in statuses.items()),
         "Form window": args.window,
-        "Picks per category": args.top,
+        "Picks per category": args.top or "all",
         "Note": "Projected lineups are an early read; confirmed lineups post 2-4h before first pitch.",
     }
     # Arsenal reference tabs. Both need the raw pitch data: the vs-LHB/vs-RHB split

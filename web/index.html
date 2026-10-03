@@ -270,6 +270,11 @@
   .toast.show{opacity:1;transform:translate(-50%,0)}
   .hidden{display:none}
   .thin{color:var(--warn)}
+  /* Sortable headers: a click re-sorts the whole board, not just the visible page. */
+  th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
+  th.sortable:hover{color:var(--text)}
+  th.sorted{color:var(--accent)}
+  th .arr{margin-left:5px;font-size:.75em}
   /* Bullpen fatigue reads at a glance: a worked pen is the thing most likely to
      turn a quiet total into a loud one late. */
   .pen-rested{color:var(--good)}
@@ -908,21 +913,85 @@ function arsenalPanel(arsenal, cols){
     ${thin?'<div class="ars-note">Dashes: too few pitches in the recent window to quote a rate.</div>':''}</td>`;
 }
 
+// Columns of the current board, in on-screen order. The header, click-to-sort and the
+// CSV export all read this one list, so they can never disagree about which column is which.
+let sortCol = null, sortDir = 1;   // sortCol null = the board's own ranking
+
+function rawValue(r, key){
+  const d = r.details || {};
+  return r[key] !== undefined ? r[key] : d[key];
+}
+
+function columnsFor(){
+  const prop = PROPS.find(p=>p.key===current);
+  const extra = (EXTRA_COLS[current] || []).map(([label, key]) => ({label, get: r=>rawValue(r, key)}));
+  const rank = {label:'#', get:r=>r.rank, asc:true};
+  const why  = {label:'Why', get:r=>r.rationale};
+  if (prop.kind !== 'player') return [rank,
+    {label:'Matchup', get:r=>r.subject}, {label:'Venue', get:r=>r.venue},
+    {label:'Score', get:r=>r.score}, {label:'Vegas', get:r=>rawValue(r, 'vegas_total')},
+    {label:'vs Vegas', get:r=>rawValue(r, 'vs_vegas')}, {label:'Park Runs', get:r=>r.park_runs},
+    ...extra, why];
+  const k = current === 'strikeouts';
+  return [rank,
+    {label: k ? 'Pitcher' : 'Player', get:r=>r.subject_name},
+    {label:'Team', get:r=>r.team},
+    {label: k ? 'Opponent' : 'Opposing SP', get:r=>r.opponent},
+    {label:'Score', get:r=>r.score},
+    ...(k ? [] : [{label:'Lineup', get:r=>r.lineup_status}]),
+    {label:'Recent', get:r=>(r.details || {}).recent_games},
+    ...extra, why];
+}
+
+// Letter grades sort by quality, not alphabet — plain text would put "A" above "A+".
+const GRADE = /^[A-F][+-]?$/;
+function sortKey(v){
+  if (v == null || v === '') return null;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (typeof v === 'number') return v;
+  const s = String(v).trim();
+  if (GRADE.test(s)) return 'FEDCBA'.indexOf(s[0]) * 3 + (s[1] === '+' ? 2 : s[1] === '-' ? 0 : 1);
+  const n = Number(s.replace(/[%,]/g, ''));
+  return Number.isNaN(n) ? s.toLowerCase() : n;
+}
+
+function sortRows(list, col, dir){
+  return list.map((r, i) => ({r, i, k: sortKey(col.get(r))}))
+    .sort((a, b) => {
+      // blanks always last, whichever way the column is sorted
+      if (a.k === null || b.k === null) return (a.k === null) - (b.k === null) || a.i - b.i;
+      if (typeof a.k !== typeof b.k) return typeof a.k === 'number' ? -1 : 1;
+      const c = typeof a.k === 'number' ? a.k - b.k : a.k.localeCompare(b.k);
+      return c * dir || a.i - b.i;   // ties keep the board's own ranking
+    })
+    .map(x => x.r);
+}
+
+// First click shows the best end first: high numbers and top grades, rank 1, text A-Z.
+function firstDir(col, list){
+  if (col.asc) return 1;
+  const k = list.map(r => sortKey(col.get(r))).find(x => x !== null);
+  return typeof k === 'number' ? -1 : 1;
+}
+
+function sortedRows(){
+  const all = filtered();
+  return sortCol === null ? all : sortRows(all, columnsFor()[sortCol], sortDir);
+}
+
 function render(){
   const prop = PROPS.find(p=>p.key===current);
-  const all = filtered();
+  // Sort the WHOLE filtered board first, then page it, so a sort reaches past row 60.
+  const all = sortedRows();
   const data = showAll ? all : all.slice(0, PAGE_ROWS);
   const isPlayer = prop.kind === 'player';
   const extra = EXTRA_COLS[current] || [];
 
-  $('#thead').innerHTML = isPlayer
-    ? `<tr><th>#</th><th>${current==='strikeouts'?'Pitcher':'Player'}</th><th>Team</th>
-       <th>${current==='strikeouts'?'Opponent':'Opposing SP'}</th><th>Score</th>
-       ${current==='strikeouts'?'':'<th>Lineup</th>'}<th>Recent</th>
-       ${extra.map(c=>`<th>${esc(c[0])}</th>`).join('')}<th>Why</th></tr>`
-    : `<tr><th>#</th><th>Matchup</th><th>Venue</th><th>Score</th>
-       <th>Vegas</th><th>vs Vegas</th><th>Park Runs</th>
-       ${extra.map(c=>`<th>${esc(c[0])}</th>`).join('')}<th>Why</th></tr>`;
+  $('#thead').innerHTML = '<tr>' + columnsFor().map((c, i) => {
+    const on = i === sortCol;
+    const arrow = on ? `<span class="arr">${sortDir > 0 ? '\u25B2' : '\u25BC'}</span>` : '';
+    return `<th class="sortable${on ? ' sorted' : ''}" data-col="${i}" title="Click to sort">${esc(c.label)}${arrow}</th>`;
+  }).join('') + '</tr>';
 
   $('#tbody').innerHTML = data.map((r,i)=>{
     const d = r.details || {};
@@ -1014,14 +1083,18 @@ function downloadXlsx(){
 }
 
 function downloadCsv(){
-  const data = filtered();
+  // Exactly the board on screen: every filtered row (not just the first page), every
+  // visible column including the per-prop grades, in the order it is sorted. It used to
+  // export the raw database fields, which left out every detail column.
+  const data = sortedRows();
   if (!data.length) return toast('Nothing to export.');
-  const cols = Object.keys(data[0]).filter(c=>c!=='details');
-  const cell = v => `"${String(v??'').replace(/"/g,'""')}"`;
-  const csv = [cols.join(','),
-    ...data.map(r=>cols.map(c=>cell(r[c])).join(','))].join('\n');
+  const cols = columnsFor();
+  const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = [cols.map(c=>cell(c.label)).join(','),
+    ...data.map(r=>cols.map(c=>cell(c.get(r))).join(','))].join('\r\n');
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv'}));
+  // BOM so Excel reads accented names (Rodríguez, Peña) as UTF-8 instead of garbling them
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + csv], {type:'text/csv'}));
   a.download = `propline_${current}_${slateDate}.csv`;
   a.click(); URL.revokeObjectURL(a.href);
 }
@@ -1090,6 +1163,7 @@ async function init(){
     const t = e.target.closest('.tab'); if(!t) return;
     current = t.dataset.k;
     showAll = false;
+    sortCol = null; sortDir = 1;   // each board opens in its own ranking
     document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on', x===t));
     loadProp().catch(err=>toast(err.message));
   });
@@ -1097,6 +1171,14 @@ async function init(){
   ['search','teamfilter','statusfilter'].forEach(id=>
     $('#'+id).addEventListener('input', ()=>{ showAll = false; render(); }));
   $('#more').addEventListener('click', ()=>{ showAll = true; render(); });
+  // Click a column header to sort the whole board; click it again to reverse.
+  $('#thead').addEventListener('click', e=>{
+    const th = e.target.closest('th[data-col]'); if (!th) return;
+    const i = +th.dataset.col;
+    if (sortCol === i) sortDir = -sortDir;
+    else { sortCol = i; sortDir = firstDir(columnsFor()[i], filtered()); }
+    render();
+  });
   // Delegated so it survives every re-render of #tbody.
   $('#tbody').addEventListener('click', e=>{
     const row = e.target.closest('tr.ars-toggle');
