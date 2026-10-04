@@ -205,12 +205,26 @@ def read(table: str, params: dict | None = None, use_anon: bool = False) -> list
     key = os.getenv("SUPABASE_ANON_KEY") if use_anon else service
     if not key:
         raise SupabaseError("SUPABASE_ANON_KEY missing — needed to read as the dashboard does")
-    r = requests.get(f"{url}/rest/v1/{table}",
-                     headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                     params=params or {"select": "*"}, timeout=TIMEOUT)
-    if not r.ok:
-        raise SupabaseError(f"{table}: {r.status_code} {r.text[:300]}")
-    return r.json()
+    # Same retry policy as upsert and delete_where. Reads are now on the critical path
+    # too — the confirmed-lineup guard and the explanation reuse both depend on them —
+    # and a single transient 522 from Cloudflare on 4 Oct 2026 silently turned reuse off
+    # for a whole run. Retry connection failures and 5xx; never retry a 4xx.
+    last = None
+    for attempt in range(1, RETRIES + 1):
+        try:
+            r = requests.get(f"{url}/rest/v1/{table}",
+                             headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                             params=params or {"select": "*"}, timeout=TIMEOUT)
+            if r.ok:
+                return r.json()
+            if 400 <= r.status_code < 500:
+                raise SupabaseError(f"{table}: {r.status_code} {r.text[:300]}")
+            last = SupabaseError(f"{table}: {r.status_code} {r.text[:200]}")
+        except requests.RequestException as exc:
+            last = SupabaseError(f"{table}: connection failed — {exc}")
+        if attempt < RETRIES:
+            time.sleep(2 ** attempt)
+    raise last
 
 
 def health_check() -> bool:

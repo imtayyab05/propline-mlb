@@ -32,7 +32,7 @@ from propline.arsenal import (attach_arsenal,  # noqa: E402
 from propline.odds import (attach_game_totals, attach_strikeout_lines,  # noqa: E402
                           fetch_slate_odds, game_totals as odds_game_totals,
                           strikeout_lines)
-from propline.publish import publish_slate  # noqa: E402
+from propline.publish import previous_rationales, publish_slate  # noqa: E402
 from propline.storage import upload_workbook  # noqa: E402
 from propline.rationale import (TOTALS_SYSTEM, add_rationales,
                                 label_internal_indexes)  # noqa: E402
@@ -258,18 +258,23 @@ def main() -> int:
     # --- rationale --------------------------------------------------------------
     if not args.no_rationale:
         print("\n[5/7] Written reasons (Groq)")
+        # What earlier runs today already explained. Unchanged picks reuse their text,
+        # so the five daily runs no longer each re-pay for every sentence.
+        previous = previous_rationales(day)
         bfields = ["player_name", "team", "opp_starter", "matchup_est_woba",
                    "matchup_est_slg", "recent_barrel_pct", "recent_hard_hit",
                    "best_pitch_for_batter", "primary_pitch", "recent_games"]
         parts = []
         for prop, grp in batter_scores.groupby("prop"):
-            parts.append(add_rationales(grp, bfields, prop, top_n=args.explain_top))
+            parts.append(add_rationales(grp, bfields, prop, top_n=args.explain_top,
+                                        key_cols=["player_id"], previous=previous))
         batter_scores = pd.concat(parts, ignore_index=True)
         if not pitcher_scores.empty:
             pitcher_scores = add_rationales(
                 pitcher_scores, ["player_name", "team", "opponent", "recent_k_per_game",
                                  "recent_k_pct", "recent_whiff_pct", "opp_lineup_k_pct",
-                                 "recent_games"], "strikeouts", top_n=args.explain_top)
+                                 "recent_games"], "strikeouts", top_n=args.explain_top,
+                key_cols=["player_id"], previous=previous)
         # Team/game indexes are banded into words BEFORE the model sees them. Simply
         # instructing it not to quote the raw values did not work — it wrote
         # "combined offense of 0.674", which means nothing to a reader.
@@ -284,7 +289,8 @@ def main() -> int:
             game_totals, ["teams", "venue", "park_runs", "combined_offense_desc",
                           "pen_summary",
                           "combined_starter_k9_desc", "temp_f", "wind"],
-            "game_total", top_n=args.explain_top, system=TOTALS_SYSTEM)
+            "game_total", top_n=args.explain_top, system=TOTALS_SYSTEM,
+            key_cols=["game_pk"], previous=previous)
 
         team_totals = label_internal_indexes(team_totals, {
             "lineup_matchup_woba": ("unfavourable", "even", "favourable"),
@@ -294,7 +300,8 @@ def main() -> int:
             team_totals, ["team", "opponent", "opp_starter", "park_runs",
                           "lineup_matchup_woba_desc", "opp_pen_status",
                           "opp_starter_weak_desc", "temp_f", "wind"],
-            "team_total", top_n=args.explain_top, system=TOTALS_SYSTEM)
+            "team_total", top_n=args.explain_top, system=TOTALS_SYSTEM,
+            key_cols=["game_pk", "team"], previous=previous)
         done = int(batter_scores.rationale.notna().sum())
         print(f"  ok    {done} batter picks explained")
     else:

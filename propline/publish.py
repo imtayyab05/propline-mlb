@@ -33,10 +33,13 @@ PROP_DETAIL = {
 }
 
 # Always useful, whatever the prop.
-COMMON_DETAIL = ["recent_games", "recent_pa", "primary_pitch", "best_pitch_for_batter",
+# rationale_fp: fingerprint of the inputs the "Why" text was written from, so the next
+# run can reuse the text when they are unchanged (propline/rationale.py).
+COMMON_DETAIL = ["rationale_fp", "recent_games", "recent_pa", "primary_pitch",
+                 "best_pitch_for_batter",
                  "arsenal_coverage"]
 
-PITCHER_DETAIL = ["split_k_matchup", "split_k_rate_matchup", "whiff_14day",
+PITCHER_DETAIL = ["rationale_fp", "split_k_matchup", "split_k_rate_matchup", "whiff_14day",
                   "vegas_k_line",
                   "opp_lineup_k_pct", "pitcher_whip", "whip_efficiency",
                   "expected_pitch_limit", "leash_penalty", "recent_games",
@@ -45,12 +48,12 @@ PITCHER_DETAIL = ["split_k_matchup", "split_k_rate_matchup", "whiff_14day",
                   # rather than in a table of its own — see propline/arsenal.py.
                   "arsenal"]
 
-GAME_DETAIL = ["combined_offense", "combined_starter_weak",
+GAME_DETAIL = ["rationale_fp", "combined_offense", "combined_starter_weak",
                "combined_pen_workload", "pen_status_home", "pen_status_away",
                "starter_whip_k9", "combined_starter_k9", "starters_resolved",
                "temp_f", "wind", "precip_pct", "weather_mult", "roof_type",
                "vegas_total", "vs_vegas", "market_edge"]
-TEAM_DETAIL = ["lineup_matchup_woba", "opp_starter_weak", "opp_pen_status",
+TEAM_DETAIL = ["rationale_fp", "lineup_matchup_woba", "opp_starter_weak", "opp_pen_status",
                "opp_pen_workload", "opp_pen_pitches_3d", "opp_pen_innings_3d",
                "starter_whip_k9", "opp_starter_whip", "opp_starter_k9",
                "temp_f", "wind", "weather_mult", "recent_team_form"]
@@ -94,6 +97,37 @@ def _details(df: pd.DataFrame, cols: list[str]) -> pd.Series:
     present = [c for c in cols if c in df.columns]
     return df[present].apply(
         lambda r: {k: _clean(v) for k, v in r.items()}, axis=1)
+
+
+def previous_rationales(slate_date) -> dict:
+    """Explanations already published for this slate, for add_rationales to reuse.
+
+    Keyed the way add_rationales keys its picks — (prop, player_id) for player props,
+    (prop, game_pk) for game totals, (prop, game_pk, team) for team totals — with the
+    fingerprint of the inputs each sentence was written from. Only rows that HAVE text
+    are fetched: ~200 rows, comfortably under PostgREST's 1,000-row cap, where the
+    whole slate is ~1,400. Failure here just means everything is written afresh.
+    """
+    out: dict = {}
+    try:
+        for r in read("prop_picks", {
+                "select": "prop,subject_id,rationale,fp:details->>rationale_fp",
+                "slate_date": f"eq.{slate_date}", "rationale": "not.is.null",
+                "limit": "1000"}):
+            if r.get("fp") and r.get("subject_id") is not None:
+                out[(r["prop"], int(r["subject_id"]))] = (r["fp"], r["rationale"])
+        for r in read("game_picks", {
+                "select": "prop,game_pk,subject,rationale,fp:details->>rationale_fp",
+                "slate_date": f"eq.{slate_date}", "rationale": "not.is.null",
+                "limit": "1000"}):
+            if not r.get("fp") or r.get("game_pk") is None:
+                continue
+            key = ((r["prop"], int(r["game_pk"]), r["subject"]) if r["prop"] == "team_total"
+                   else (r["prop"], int(r["game_pk"])))
+            out[key] = (r["fp"], r["rationale"])
+    except Exception as exc:  # noqa: BLE001 — reuse is an optimisation, never a blocker
+        print(f"  WARN  could not read earlier explanations ({exc}) — writing all afresh")
+    return out
 
 
 def publish_slate(slate_date, schedule, lineups, bullpen,

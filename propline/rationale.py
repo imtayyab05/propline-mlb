@@ -10,6 +10,7 @@ per player. Comfortably inside Groq's free tier.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -208,6 +209,12 @@ def _call(rows: list[dict], api_key: str, system: str = None) -> dict[int, str]:
         ],
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
+        # gpt-oss-20b is a reasoning model, and its hidden reasoning is billed against
+        # the same allowance as the text. Measured on 6 real-shaped picks (4 Oct 2026):
+        # default effort spent 839 of 1,080 output tokens thinking (2,601 per call);
+        # "low" spent 31 (1,775 per call) and wrote the same sentences. Restating
+        # supplied numbers needs no deliberation.
+        "reasoning_effort": "low",
     }
     for attempt in range(1, RATE_LIMIT_RETRIES + 1):
         r = requests.post(ENDPOINT, headers={"Authorization": f"Bearer {api_key}"},
@@ -231,29 +238,54 @@ def _call(rows: list[dict], api_key: str, system: str = None) -> dict[int, str]:
     raise RuntimeError("groq: rate limited after retries")
 
 
+def _fingerprint(item: dict, system: str) -> str:
+    """Identity of exactly what a sentence was written from.
+
+    The text quotes the numbers it was given, so it may only be reused when those
+    numbers, the instructions and the model are all unchanged. Any difference — a
+    confirmed lineup moving a hitter, a new starter, an edited prompt — rewrites it.
+    """
+    blob = json.dumps({"m": MODEL, "s": system, "i": item}, sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _norm(v):
+    """Make ids comparable across pandas and JSON: 701542.0, int64 and 701542 match."""
+    if hasattr(v, "item"):
+        v = v.item()
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    return v
+
+
 def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
                    top_n: int = 15, api_key: str | None = None,
-                   system: str | None = None) -> pd.DataFrame:
+                   system: str | None = None, key_cols: list[str] | None = None,
+                   previous: dict | None = None) -> pd.DataFrame:
     """Attach a `rationale` column to the top N rows of a scored frame.
 
     Only the shortlist gets sent — there is no value in explaining pick #180, and it
     keeps the request small. Everything below top_n simply has no rationale.
+
+    `previous` maps (label, *key_cols values) -> (fingerprint, text) for what an
+    earlier run already published on this slate. A pick whose inputs are unchanged
+    reuses that text instead of paying for it again — see the note in the body.
     """
     df = df.copy()
-    if "rationale" not in df.columns:
-        df["rationale"] = None
+    for col in ("rationale", "rationale_fp"):
+        if col not in df.columns:
+            df[col] = None
     if df.empty:
         return df
 
+    # Resolved once, so the fingerprint and the request use the very same instructions.
+    system = system or SYSTEM
     api_key = api_key or os.getenv("GROQ_API_KEY")
-    if not api_key:
-        print("  WARN  GROQ_API_KEY missing — picks will have no written reasons")
-        return df
 
     top = df.sort_values("score", ascending=False).head(top_n)
-    rows = []
-    for i, (_, r) in enumerate(top.iterrows()):
-        item = {"id": i, "prop": label}
+    items, fps, keys = [], [], []
+    for _, r in top.iterrows():
+        item = {"prop": label}
         for f in fields:
             if f in r.index and pd.notna(r[f]):
                 v = r[f]
@@ -262,20 +294,42 @@ def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
                     item[f] = int(v) if float(v).is_integer() else round(float(v), 3)
                 else:
                     item[f] = str(v)
-        rows.append(item)
+        items.append(item)
+        fps.append(_fingerprint(item, system))
+        keys.append((label, *(_norm(r[c]) for c in key_cols)) if key_cols else None)
+
+    # Reuse what an earlier run today already wrote from these exact inputs.
+    #
+    # Every publish replaces the slate, and there are five runs a day. Each one used to
+    # re-pay for all ~200 sentences, so the free daily allowance ran out mid-afternoon
+    # and the late runs published a mostly blank Why column — 776 of 3,915 top picks
+    # explained across September (20%). Reusing unchanged text means a later run only
+    # pays for picks that are new or whose numbers moved.
+    texts: dict[int, str] = {}
+    previous = previous or {}
+    for pos, (k, fp) in enumerate(zip(keys, fps)):
+        prev = previous.get(k) if k is not None else None
+        if prev and prev[0] == fp and prev[1]:
+            texts[pos] = prev[1]
+    reused = len(texts)
+    todo = [pos for pos in range(len(items)) if pos not in texts]
+
+    if todo and not api_key:
+        print(f"  WARN  GROQ_API_KEY missing — {len(todo)} {label} picks have no new reasons")
+        todo = []
 
     # Degrade gracefully. Groq is the least reliable dependency in the pipeline — models
     # get retired, quotas bite, and this one intermittently returns an empty completion —
     # so a failure must cost only the sentences it actually lost. Previously one bad
     # chunk returned early and discarded every rationale already collected for that
     # category, turning a partial failure into a total one.
-    texts: dict[int, str] = {}
+    rows = [{"id": pos, **items[pos]} for pos in todo]
     split = 0
     for i in range(0, len(rows), MAX_PER_CALL):
         chunk = rows[i:i + MAX_PER_CALL]
         try:
             got = _call(chunk, api_key, system)
-            texts.update({k + i: v for k, v in got.items()})
+            texts.update({k: v for k, v in got.items() if k in todo})
         except Exception as exc:  # noqa: BLE001 — never let this break the pipeline
             # Retry at half size: an empty completion is usually the model running out
             # of output room, which a smaller batch fixes.
@@ -285,17 +339,20 @@ def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
                 sub = chunk[j:j + half]
                 try:
                     got = _call(sub, api_key, system)
-                    texts.update({k + i + j: v for k, v in got.items()})
+                    texts.update({k: v for k, v in got.items() if k in todo})
                 except Exception:
                     print(f"  WARN  {label}: {len(sub)} picks unexplained ({exc})")
                 time.sleep(PAUSE_BETWEEN_CALLS)
         time.sleep(PAUSE_BETWEEN_CALLS)
 
-    if texts:
-        note = f", {split} chunk(s) split" if split else ""
-        print(f"  ok    {label}: {len(texts)}/{len(rows)} explained{note}")
+    have = sum(1 for t in texts.values() if t)
+    note = f", {split} chunk(s) split" if split else ""
+    print(f"  ok    {label}: {have}/{len(items)} explained "
+          f"({reused} reused, {have - reused} written{note})")
 
     for pos, idx in enumerate(top.index):
-        if pos in texts:
+        if texts.get(pos):
             df.at[idx, "rationale"] = texts[pos]
+            # stored with the pick so the next run can tell whether this text still fits
+            df.at[idx, "rationale_fp"] = fps[pos]
     return df
