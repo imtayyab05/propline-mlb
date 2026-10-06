@@ -258,6 +258,19 @@ def _norm(v):
     return v
 
 
+def _own(got: dict[int, str], sent: list[dict]) -> dict[int, str]:
+    """Keep only sentences for ids that were in the batch that produced them.
+
+    Each pick is sent with its position in the shortlist as its id, and the model echoes
+    those ids back, so they are used exactly as returned. Before 4 Oct 2026 the batch
+    offset was added a second time: picks 13-24 never got text and pick 25 showed pick
+    13's sentence (Mike Trout's row carried Alec Bohm's on 20 Sep). Restricting to the
+    batch also stops a stray id echoed by the model from landing on another player.
+    """
+    ids = {r["id"] for r in sent}
+    return {k: v for k, v in got.items() if k in ids and v}
+
+
 def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
                    top_n: int = 15, api_key: str | None = None,
                    system: str | None = None, key_cols: list[str] | None = None,
@@ -328,8 +341,7 @@ def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
     for i in range(0, len(rows), MAX_PER_CALL):
         chunk = rows[i:i + MAX_PER_CALL]
         try:
-            got = _call(chunk, api_key, system)
-            texts.update({k: v for k, v in got.items() if k in todo})
+            texts.update(_own(_call(chunk, api_key, system), chunk))
         except Exception as exc:  # noqa: BLE001 — never let this break the pipeline
             # Retry at half size: an empty completion is usually the model running out
             # of output room, which a smaller batch fixes.
@@ -338,8 +350,7 @@ def add_rationales(df: pd.DataFrame, fields: list[str], label: str,
             for j in range(0, len(chunk), half):
                 sub = chunk[j:j + half]
                 try:
-                    got = _call(sub, api_key, system)
-                    texts.update({k: v for k, v in got.items() if k in todo})
+                    texts.update(_own(_call(sub, api_key, system), sub))
                 except Exception:
                     print(f"  WARN  {label}: {len(sub)} picks unexplained ({exc})")
                 time.sleep(PAUSE_BETWEEN_CALLS)
