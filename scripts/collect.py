@@ -60,6 +60,22 @@ def main() -> int:
 
     print(f"\n{'='*66}\nPropLine collection — {day}\n{'='*66}")
 
+    # Check the schedule FIRST. On a day without games (between playoff rounds, the
+    # gap after the regular season, all winter) the full Savant pull still ran — about
+    # five minutes and ~80 MB per run, five runs a day, on the private repo's GitHub
+    # minutes — before processing noticed there was nothing to score. Now an off-day
+    # writes a minimal workbook (empty schedule + lineups, which process.py already
+    # handles by exiting cleanly) and stops.
+    schedule = get_schedule(day)
+    if schedule.empty:
+        print("\n  ok    no games scheduled — skipping the Savant downloads")
+        sheets = build_intermediate(raw_dir, out_xlsx,
+                                    extra={"schedule": schedule, "lineups": pd.DataFrame()})
+        log_run(day, args.run_kind, "collection", "ok",
+                detail="no games scheduled — downloads skipped", started_at=started)
+        print(f"  ok    {out_xlsx}  ({len(sheets)} sheets)\ncollection OK (off-day)")
+        return 0
+
     # Can we skip the expensive half? Only if the earlier run of this same slate
     # actually left its files behind — otherwise silently fall back to a full pull
     # rather than producing a half-empty workbook.
@@ -124,7 +140,7 @@ def main() -> int:
 
     # 4. Schedule, lineups, bullpen
     print("\n[4/5] Schedule / lineups / bullpen")
-    schedule = get_schedule(day)
+    # `schedule` was fetched at the top, before deciding whether to download anything.
     print(f"  ok    schedule: {len(schedule)} games")
     lineups = get_lineups(day, schedule)
     if lineups.empty:
